@@ -33,7 +33,7 @@ const db   = getFirestore(app);
 const storage = getStorage(app);
 const ADMIN_EMAIL = "f2kmultiservice@gmail.com";
 
-await setPersistence(auth, browserLocalPersistence);
+setPersistence(auth, browserLocalPersistence).catch(console.warn);
 
 let currentUser = null;
 let isAdmin     = false;
