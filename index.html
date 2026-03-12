@@ -517,7 +517,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if(ev.key==='Escape') document.querySelectorAll('.modal-overlay.open').forEach(m=>closeModal(m.id));
   });
   loadListings();
-  setTimeout(()=>document.getElementById('loader').classList.add('hide'),1600);
+  setTimeout(()=>{
+  const l=document.getElementById('loader');
+  if(l) l.classList.add('hide');
+},1800);
 });
 
 let toastT;
