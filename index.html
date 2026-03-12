@@ -5,351 +5,1108 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>F2K IMMO PLUS — Agence Immobilière & Services</title>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;900&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp }          from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+         signOut, onAuthStateChanged, updateProfile, setPersistence, browserLocalPersistence }
+                                   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc,
+         query, orderBy, serverTimestamp }
+                                   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getStorage, ref as sRef, uploadBytes, getDownloadURL }
+                                   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCZbaAgxGSoBARvs9b-Q-ACvQdfzbp3mqE",
+  authDomain: "f2k-immo.firebaseapp.com",
+  projectId: "f2k-immo",
+  storageBucket: "f2k-immo.firebasestorage.app",
+  messagingSenderId: "602747222782",
+  appId: "1:602747222782:web:f95bfdb18ca8a552d2c3af",
+  measurementId: "G-QLPQ5REWQH"
+};
+
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+const storage = getStorage(app);
+const ADMIN_EMAIL = "f2kmultiservice@gmail.com";
+
+// ── Persist session across page reloads ─────────────────
+await setPersistence(auth, browserLocalPersistence);
+
+// ── STATE ────────────────────────────────────────────────
+let currentUser = null;
+let isAdmin     = false;
+let allListings = [];
+
+// ── AUTH STATE LISTENER ──────────────────────────────────
+onAuthStateChanged(auth, (user) => {
+  currentUser = user;
+  isAdmin     = !!(user && user.email === ADMIN_EMAIL);
+  updateNavUI();
+  // Show "publish" button in nav for logged-in vendors/owners
+  const pubBtn = document.getElementById('nav-publish-btn');
+  if (pubBtn) pubBtn.style.display = (user && !isAdmin) ? 'inline-block' : 'none';
+});
+
+function updateNavUI() {
+  const navGuest = document.getElementById('nav-guest');
+  const navUser  = document.getElementById('nav-user');
+  const navAdm   = document.getElementById('nav-adm');
+  if (!navGuest) return;
+  if (currentUser) {
+    navGuest.style.display = 'none';
+    navUser.style.display  = 'flex';
+    navAdm.style.display   = isAdmin ? 'flex' : 'none';
+    document.getElementById('nav-avatar-name').textContent =
+      (currentUser.displayName || currentUser.email).charAt(0).toUpperCase();
+    document.getElementById('nav-username').textContent =
+      currentUser.displayName || currentUser.email.split('@')[0];
+  } else {
+    navGuest.style.display = 'flex';
+    navUser.style.display  = 'none';
+    navAdm.style.display   = 'none';
+  }
+}
+
+// ── PAGE NAV ─────────────────────────────────────────────
+window.showPage = function(id) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  window.scrollTo(0, 0);
+  if (id === 'adm-page')      { if (!isAdmin) { showPage('home-page'); return; } loadAdminData(); }
+  if (id === 'listings-page') { loadListings().then(() => renderListingsPage('tous')); }
+};
+
+// ── LOAD LISTINGS ────────────────────────────────────────
+async function loadListings() {
+  try {
+    const snap = await getDocs(query(collection(db,'listings'), orderBy('createdAt','desc')));
+    allListings = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // Update home stat
+    const el = document.getElementById('home-stat-listings');
+    if (el) el.textContent = allListings.length;
+  } catch(err) {
+    console.warn('loadListings:', err.message);
+    allListings = [];
+  }
+  renderHomeListings('tous');
+}
+
+function renderHomeListings(filter) {
+  const grid = document.getElementById('home-listings-grid');
+  if (!grid) return;
+  let data = filter === 'tous' ? allListings : allListings.filter(l => l.transaction === filter);
+  if (!data.length) {
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:var(--g400);padding:60px 0;font-size:1rem">Aucune annonce pour le moment</div>`;
+    return;
+  }
+  grid.innerHTML = data.slice(0, 6).map(listingCard).join('');
+}
+
+function renderListingsPage(filter) {
+  const grid = document.getElementById('listings-page-grid');
+  if (!grid) return;
+  let data = filter === 'tous' ? allListings : allListings.filter(l => l.transaction === filter);
+  const q   = (document.getElementById('lp-search-q')?.value   || '').toLowerCase();
+  const loc = (document.getElementById('lp-search-loc')?.value || '').toLowerCase();
+  if (q)   data = data.filter(l => (l.type||'').toLowerCase().includes(q)  || (l.title||'').toLowerCase().includes(q));
+  if (loc) data = data.filter(l => (l.loc||'').toLowerCase().includes(loc));
+  if (!data.length) {
+    grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:var(--g400);padding:60px 0">Aucun bien trouvé</div>`;
+    return;
+  }
+  grid.innerHTML = data.map(listingCard).join('');
+}
+
+function safeJson(l) {
+  return JSON.stringify(l).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;');
+}
+
+function listingCard(l) {
+  const img = l.imageURL
+    ? `<img src="${l.imageURL}" style="width:100%;height:100%;object-fit:cover" alt="${l.title||''}">`
+    : `<span style="font-size:3rem">${l.emoji||'🏡'}</span>`;
+  const owned = currentUser && l.ownerUID === currentUser.uid;
+  const delBtn = owned
+    ? `<button class="listing-fav" style="right:56px;background:rgba(220,38,38,.7)" onclick="userDelListing('${l.id}',event)">🗑️</button>`
+    : '';
+  return `<div class="listing-card">
+    <div class="listing-img ${l.ic||'appart'}">${img}
+      <span class="listing-badge ${l.transaction==='location'?'loc':''}">${l.transaction==='vente'?'À Vendre':'À Louer'}</span>
+      <button class="listing-fav" onclick="toggleFav(this)">🤍</button>
+      ${delBtn}
+    </div>
+    <div class="listing-body">
+      <div class="listing-type">${l.type||''}</div>
+      <div class="listing-title">${l.title||''}</div>
+      <div class="listing-loc">📍 ${l.loc||''}</div>
+      <div class="listing-features">
+        ${(l.rooms>0)?`<span>🛏 ${l.rooms} ch.</span>`:''}
+        ${(l.bath>0)?`<span>🚿 ${l.bath} SDB</span>`:''}
+        ${l.area?`<span>📐 ${l.area} m²</span>`:''}
+      </div>
+      <div class="listing-footer">
+        <div class="listing-price">${Number(l.price||0).toLocaleString('fr-FR')} <span>${l.unit||'FCFA'}</span></div>
+        <button class="btn-sm" onclick="openDetail('${l.id}')">Voir détail</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+window.openDetail = function(id) {
+  const l = allListings.find(x => x.id === id);
+  if (!l) return;
+  const img = l.imageURL
+    ? `<img src="${l.imageURL}" style="width:100%;max-height:300px;object-fit:cover;border-radius:12px;margin-bottom:18px">`
+    : `<div style="height:180px;background:linear-gradient(135deg,#1a2a1a,#1d3d2f);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:5rem;margin-bottom:18px">${l.emoji||'🏡'}</div>`;
+  document.getElementById('detail-body').innerHTML = `
+    ${img}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <span class="listing-badge ${l.transaction==='location'?'loc':''}" style="position:static">${l.transaction==='vente'?'À Vendre':'À Louer'}</span>
+      <span style="background:var(--g100);padding:3px 12px;border-radius:20px;font-size:.76rem;font-weight:600">${l.type||''}</span>
+    </div>
+    <h2 style="font-family:'Playfair Display',serif;font-size:1.5rem;margin-bottom:8px">${l.title||''}</h2>
+    <p style="color:var(--g400);margin-bottom:14px">📍 ${l.loc||''}</p>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;padding:14px;background:var(--g100);border-radius:8px;margin-bottom:16px">
+      ${(l.rooms>0)?`<span>🛏 ${l.rooms} chambres</span>`:''}
+      ${(l.bath>0)?`<span>🚿 ${l.bath} SDB</span>`:''}
+      ${l.area?`<span>📐 ${l.area} m²</span>`:''}
+    </div>
+    ${l.desc?`<p style="line-height:1.7;color:var(--g600);margin-bottom:16px">${l.desc}</p>`:''}
+    <div style="font-family:'Playfair Display',serif;font-size:1.7rem;font-weight:700;margin-bottom:20px">
+      ${Number(l.price||0).toLocaleString('fr-FR')} <span style="font-size:.9rem;font-weight:400;color:var(--g400)">${l.unit||'FCFA'}</span>
+    </div>
+    <p style="font-size:.8rem;color:var(--g600);padding:12px;background:#fff8ee;border-left:3px solid var(--accent);border-radius:4px;margin-bottom:18px">
+      ⚠️ Visite obligatoire avant tout paiement. F2K IMMO PLUS agit en tant qu'intermédiaire uniquement.
+    </p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <a href="https://wa.me/2290158070708?text=Bonjour%2C+je+suis+intéressé+par+:+${encodeURIComponent(l.title||'')}" target="_blank" class="btn-primary" style="flex:1;text-align:center;background:#25D366;color:#fff">💬 WhatsApp</a>
+      <button class="btn-primary" style="flex:1;background:var(--black)" onclick="closeModal('m-detail')">Fermer</button>
+    </div>`;
+  openModal('m-detail');
+};
+
+// ── USER: DELETE OWN LISTING ─────────────────────────────
+window.userDelListing = async function(id, e) {
+  e.stopPropagation();
+  if (!confirm('Supprimer votre annonce ?')) return;
+  try {
+    await deleteDoc(doc(db,'listings',id));
+    showToast('🗑️ Votre annonce a été supprimée');
+    await loadListings();
+  } catch(err) { showToast('❌ ' + err.message); }
+};
+
+// ── USER: PUBLISH LISTING ────────────────────────────────
+window.userPublishListing = async function(e) {
+  e.preventDefault();
+  if (!currentUser) { showToast('❌ Vous devez être connecté'); return; }
+  const imgFile = document.getElementById('up-img').files[0];
+  let imageURL = null;
+  setBtnLoading('btn-user-publish', true);
+  try {
+    if (imgFile) {
+      const storageRef = sRef(storage, `listings/${Date.now()}_${imgFile.name}`);
+      const snap = await uploadBytes(storageRef, imgFile);
+      imageURL = await getDownloadURL(snap.ref);
+    }
+    const tp = document.getElementById('up-type').value;
+    const data = {
+      type:        tp,
+      title:       document.getElementById('up-title').value.trim(),
+      loc:         document.getElementById('up-loc').value.trim(),
+      price:       document.getElementById('up-price').value,
+      unit:        document.getElementById('up-unit').value,
+      rooms:       parseInt(document.getElementById('up-rooms').value)||0,
+      bath:        parseInt(document.getElementById('up-bath').value)||0,
+      area:        parseInt(document.getElementById('up-area').value)||0,
+      transaction: document.getElementById('up-trans').value,
+      desc:        document.getElementById('up-desc').value.trim(),
+      emoji:       emojiForType(tp),
+      ic:          icClass(tp),
+      owner:       currentUser.displayName || currentUser.email,
+      ownerEmail:  currentUser.email,
+      ownerUID:    currentUser.uid,         // ← saved in Firestore
+      imageURL,
+      createdAt:   serverTimestamp()
+    };
+    await addDoc(collection(db,'listings'), data);
+    showToast('✅ Votre annonce a été publiée !');
+    e.target.reset();
+    document.getElementById('up-img-preview').innerHTML = '';
+    closeModal('m-publish');
+    await loadListings();
+  } catch(err) {
+    showToast('❌ Erreur : ' + err.message);
+  } finally { setBtnLoading('btn-user-publish', false); }
+};
+
+// ── AUTH: REGISTER ───────────────────────────────────────
+window.doRegister = async function(e) {
+  e.preventDefault();
+  const name  = document.getElementById('reg-name').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
+  const pass  = document.getElementById('reg-pass').value;
+  const role  = document.getElementById('reg-role').value;
+  const terms = document.getElementById('reg-terms').checked;
+  if (!terms) { showToast('❌ Veuillez accepter les conditions'); return; }
+  setBtnLoading('btn-register', true);
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    await updateProfile(cred.user, { displayName: name });
+    // Save user profile in Firestore
+    await addDoc(collection(db,'users'), {
+      uid: cred.user.uid, name, email, role,
+      createdAt: serverTimestamp(), active: true
+    });
+    closeModal('m-register');
+    showToast(`✅ Bienvenue ${name} ! Compte créé et connecté.`);
+  } catch(err) {
+    const msg = {
+      'auth/email-already-in-use': 'Cet email est déjà utilisé.',
+      'auth/weak-password':        'Mot de passe trop court (min. 6 caractères).',
+      'auth/invalid-email':        'Adresse email invalide.'
+    }[err.code] || err.message;
+    showToast('❌ ' + msg);
+  } finally { setBtnLoading('btn-register', false); }
+};
+
+// ── AUTH: LOGIN ──────────────────────────────────────────
+window.doLogin = async function(e) {
+  e.preventDefault();
+  const email = document.getElementById('login-email').value.trim();
+  const pass  = document.getElementById('login-pass').value;
+  setBtnLoading('btn-login', true);
+  try {
+    const cred = await signInWithEmailAndPassword(auth, email, pass);
+    closeModal('m-login');
+    showToast(`✅ Connexion réussie ! Bienvenue ${cred.user.displayName || email.split('@')[0]}.`);
+    if (email === ADMIN_EMAIL) setTimeout(() => showPage('adm-page'), 400);
+  } catch(err) {
+    // Firebase v9+ returns 'auth/invalid-credential' for wrong email/password
+    const msg = (
+      err.code === 'auth/invalid-credential'   ||
+      err.code === 'auth/wrong-password'        ||
+      err.code === 'auth/user-not-found'        ||
+      err.code === 'auth/invalid-email'
+    ) ? 'Email ou mot de passe incorrect. Vérifiez vos informations.'
+      : err.message;
+    showToast('❌ ' + msg);
+  } finally { setBtnLoading('btn-login', false); }
+};
+
+// ── AUTH: LOGOUT ─────────────────────────────────────────
+window.doLogout = async function() {
+  await signOut(auth);
+  showPage('home-page');
+  showToast('👋 Déconnecté avec succès');
+};
+
+// ── ADMIN DATA ───────────────────────────────────────────
+async function loadAdminData() {
+  loadAdmListings();
+  loadAdmUsers();
+  loadAdmMessages();
+}
+
+async function loadAdmListings() {
+  const snap = await getDocs(query(collection(db,'listings'), orderBy('createdAt','desc')));
+  allListings = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  renderAdmListings();
+  updateAdmStats();
+}
+
+async function loadAdmUsers() {
+  const snap = await getDocs(query(collection(db,'users'), orderBy('createdAt','desc')));
+  const users = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const tbody = document.getElementById('adm-users-tbody');
+  if (!tbody) return;
+  const roleLabel = {locataire:'Locataire',proprietaire:'Propriétaire',acheteur:'Acheteur',vendeur:'Vendeur'};
+  tbody.innerHTML = users.map(u => `
+    <tr>
+      <td><strong>${u.name||'—'}</strong></td>
+      <td>${u.email||'—'}</td>
+      <td><span class="badge-role ${u.role||''}">${roleLabel[u.role]||u.role||'—'}</span></td>
+      <td>${u.createdAt?.toDate ? u.createdAt.toDate().toLocaleDateString('fr-FR') : '—'}</td>
+      <td><button class="adm-btn-del" onclick="admDelUser('${u.id}')">🗑️</button></td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--g400)">Aucun utilisateur</td></tr>';
+  const el = document.getElementById('adm-stat-users');
+  if (el) el.textContent = users.length;
+}
+
+async function loadAdmMessages() {
+  const snap = await getDocs(query(collection(db,'messages'), orderBy('createdAt','desc')));
+  const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const tbody = document.getElementById('adm-msgs-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = msgs.map(m => `
+    <tr>
+      <td><strong>${m.name||'—'}</strong></td>
+      <td>${m.email||'—'}</td>
+      <td>${m.service||'—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${m.msg||'—'}</td>
+      <td>${m.createdAt?.toDate ? m.createdAt.toDate().toLocaleDateString('fr-FR') : '—'}</td>
+    </tr>`).join('') || '<tr><td colspan="5" style="text-align:center;color:var(--g400)">Aucun message</td></tr>';
+  const el = document.getElementById('adm-stat-msgs');
+  if (el) el.textContent = msgs.length;
+}
+
+function renderAdmListings() {
+  const tbody = document.getElementById('adm-listings-tbody');
+  if (!tbody) return;
+  tbody.innerHTML = allListings.map(l => `
+    <tr>
+      <td><strong>${l.title||'—'}</strong></td>
+      <td>${l.type||'—'}</td>
+      <td>${l.transaction==='vente'?'Vente':'Location'}</td>
+      <td>${l.loc||'—'}</td>
+      <td>${Number(l.price||0).toLocaleString('fr-FR')} ${l.unit||'FCFA'}</td>
+      <td><button class="adm-btn-del" onclick="admDelListing('${l.id}')">🗑️</button></td>
+    </tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--g400)">Aucune annonce</td></tr>';
+}
+
+function updateAdmStats() {
+  const set = (id,v) => { const el=document.getElementById(id); if(el) el.textContent=v; };
+  set('adm-stat-listings', allListings.length);
+  set('adm-stat-vente',    allListings.filter(l=>l.transaction==='vente').length);
+  set('adm-stat-loc',      allListings.filter(l=>l.transaction==='location').length);
+}
+
+// ── ADMIN: ADD LISTING ───────────────────────────────────
+window.admAddListing = async function(e) {
+  e.preventDefault();
+  if (!isAdmin) return;
+  const imgFile = document.getElementById('ad-img').files[0];
+  let imageURL = null;
+  setBtnLoading('btn-adm-add', true);
+  try {
+    if (imgFile) {
+      const storageRef = sRef(storage, `listings/${Date.now()}_${imgFile.name}`);
+      const snap = await uploadBytes(storageRef, imgFile);
+      imageURL = await getDownloadURL(snap.ref);
+    }
+    const tp = document.getElementById('ad-type').value;
+    await addDoc(collection(db,'listings'), {
+      type:        tp,
+      title:       document.getElementById('ad-title').value,
+      loc:         document.getElementById('ad-loc').value,
+      price:       document.getElementById('ad-price').value,
+      unit:        document.getElementById('ad-unit').value,
+      rooms:       parseInt(document.getElementById('ad-rooms').value)||0,
+      bath:        parseInt(document.getElementById('ad-bath').value)||0,
+      area:        parseInt(document.getElementById('ad-area').value)||0,
+      transaction: document.getElementById('ad-trans').value,
+      desc:        document.getElementById('ad-desc').value,
+      emoji:       emojiForType(tp),
+      ic:          icClass(tp),
+      owner:       'Agence F2K IMMO PLUS',
+      ownerEmail:  ADMIN_EMAIL,
+      ownerUID:    'admin',
+      imageURL,
+      createdAt:   serverTimestamp()
+    });
+    showToast('✅ Annonce ajoutée avec succès !');
+    e.target.reset();
+    document.getElementById('img-preview').innerHTML = '';
+    loadAdmListings();
+    showAdmTab('listings');
+  } catch(err) { showToast('❌ ' + err.message); }
+  finally { setBtnLoading('btn-adm-add', false); }
+};
+
+window.admDelListing = async function(id) {
+  if (!confirm('Supprimer cette annonce ?')) return;
+  await deleteDoc(doc(db,'listings',id));
+  showToast('🗑️ Annonce supprimée');
+  loadAdmListings();
+};
+
+window.admDelUser = async function(id) {
+  if (!confirm('Supprimer cet utilisateur ?')) return;
+  await deleteDoc(doc(db,'users',id));
+  showToast('🗑️ Utilisateur supprimé');
+  loadAdmUsers();
+};
+
+// ── CONTACT FORMS ────────────────────────────────────────
+window.handleContact = async function(e) {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await addDoc(collection(db,'messages'), {
+      name: f[0].value + ' ' + f[1].value,
+      email: f[2].value, phone: f[3].value,
+      service: f[4].value, msg: f[5].value,
+      createdAt: serverTimestamp()
+    });
+    showToast('✅ Message envoyé ! Réponse sous 24h.');
+    e.target.reset();
+  } catch(err) { showToast('❌ ' + err.message); }
+};
+
+window.handleSrvContact = async function(e) {
+  e.preventDefault();
+  try {
+    await addDoc(collection(db,'messages'), {
+      name: e.target[0].value, email: e.target[1].value, phone: '',
+      service: document.getElementById('srv-title').textContent,
+      msg: e.target[2].value, createdAt: serverTimestamp()
+    });
+    closeModal('m-service');
+    showToast('✅ Demande envoyée !');
+    e.target.reset();
+  } catch(err) { showToast('❌ ' + err.message); }
+};
+
+// ── HELPERS ──────────────────────────────────────────────
+function emojiForType(t) {
+  return {Villa:'🏡',Appartement:'🏢',Bureau:'🏬',Terrain:'🌿','Local commercial':'🏪',Maison:'🏠'}[t] || '🏡';
+}
+function icClass(t) {
+  if (t==='Villa'||t==='Maison')             return 'villa';
+  if (t==='Bureau'||t==='Local commercial')  return 'bureau';
+  if (t==='Terrain')                         return 'terrain';
+  return 'appart';
+}
+function setBtnLoading(id, loading) {
+  const b = document.getElementById(id);
+  if (!b) return;
+  b.disabled = loading;
+  if (!b.dataset.orig) b.dataset.orig = b.textContent;
+  b.textContent = loading ? '⏳ Patientez...' : b.dataset.orig;
+}
+
+window.toggleFav = function(btn) {
+  btn.textContent = btn.textContent==='🤍'?'❤️':'🤍';
+  showToast(btn.textContent==='❤️'?'❤️ Ajouté aux favoris':'Retiré des favoris');
+};
+
+window.showAdmTab = function(tab) {
+  document.querySelectorAll('.adm-tab-content').forEach(t=>t.classList.remove('active'));
+  document.getElementById('adm-'+tab).classList.add('active');
+  document.querySelectorAll('.adm-menu a').forEach(a=>a.classList.remove('active-adm'));
+  document.querySelector(`.adm-menu a[data-tab="${tab}"]`)?.classList.add('active-adm');
+};
+
+function previewImgTo(inputId, previewId) {
+  const file = document.getElementById(inputId).files[0];
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    document.getElementById(previewId).innerHTML =
+      `<img src="${ev.target.result}" style="max-width:100%;max-height:160px;border-radius:8px;margin-top:10px;border:2px solid var(--accent)">`;
+  };
+  r.readAsDataURL(file);
+}
+window.previewImg   = () => previewImgTo('ad-img',  'img-preview');
+window.previewUpImg = () => previewImgTo('up-img', 'up-img-preview');
+
+// ── TABS ─────────────────────────────────────────────────
+window.switchTab = function(btn, filter) {
+  btn.closest('.tabs').querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  const isLP = document.getElementById('listings-page').classList.contains('active');
+  if (isLP) renderListingsPage(filter);
+  else renderHomeListings(filter);
+};
+
+window.doSearch = function() {
+  showPage('listings-page');
+  renderListingsPage('tous');
+};
+
+// ── SERVICE MODAL ─────────────────────────────────────────
+const srvData = {
+  vente:{title:'🏠 Vente Immobilière',desc:"Vous souhaitez acheter ou vendre un bien ? Notre équipe vous accompagne à chaque étape."},
+  location:{title:'🔑 Location',desc:"Large sélection de logements et bureaux. Du dossier à la remise des clés."},
+  gestion:{title:'📋 Gestion Locative',desc:"Confiez votre patrimoine. Nous gérons loyers, locataires et entretien."},
+  entretien:{title:'🧹 Entretien Bureaux & Maisons',desc:"Équipes professionnelles pour le nettoyage et entretien de vos espaces."},
+  demenagement:{title:'🚚 Déménagement',desc:"Service complet : emballage, transport sécurisé, installation."},
+  notaire:{title:'⚖️ Services Notariaux',desc:"Mise en relation avec nos notaires partenaires pour sécuriser vos transactions."},
+};
+window.openSrvModal = function(k) {
+  const d = srvData[k];
+  document.getElementById('srv-title').textContent = d.title;
+  document.getElementById('srv-desc').textContent  = d.desc;
+  openModal('m-service');
+};
+
+// ── TERMS MODAL ───────────────────────────────────────────
+const termsData = {
+  locataire:`<div class="terms-section"><h3>1. Rôle de l'agence</h3><p>F2K IMMO PLUS agit exclusivement en tant qu'<strong>intermédiaire</strong> entre le locataire et le propriétaire. L'agence ne possède aucun des biens présentés et n'est en aucun cas partie au contrat de bail.</p><div class="highlight">⚠️ F2K IMMO PLUS n'est pas responsable de l'état du bien, des vices cachés, ni des litiges entre locataire et propriétaire.</div></div><div class="terms-section"><h3>2. Processus de location</h3><ul><li>Le locataire consulte les annonces disponibles.</li><li>L'agence organise une visite. <strong>La visite est obligatoire avant tout engagement.</strong></li><li>Si le locataire est satisfait, il confirme son intérêt.</li><li>Le paiement s'effectue après accord mutuel. <strong>Aucun remboursement n'est possible</strong> après signature.</li></ul></div><div class="terms-section"><h3>3. Obligations du locataire</h3><ul><li>Fournir des justificatifs honnêtes et complets.</li><li>Respecter les termes du contrat de bail.</li><li>Payer le loyer aux dates convenues.</li><li>Entretenir le bien en bon état.</li><li>Ne pas sous-louer sans accord écrit du propriétaire.</li></ul></div><div class="terms-section"><h3>4. Limitation de responsabilité</h3><div class="highlight">F2K IMMO PLUS ne pourra être tenue responsable de tout dommage résultant de l'occupation du bien. Le locataire reconnaît avoir visité et accepté le bien en connaissance de cause.</div></div>`,
+  proprietaire:`<div class="terms-section"><h3>1. Rôle de l'agence</h3><p>F2K IMMO PLUS est un <strong>intermédiaire</strong> pour faciliter la mise en relation. Elle ne gère pas vos biens directement sauf mandat signé.</p></div><div class="terms-section"><h3>2. Publication d'une annonce</h3><ul><li>Le propriétaire certifie être le détenteur légal du bien.</li><li>Les informations doivent être exactes et à jour.</li><li>Toute annonce frauduleuse entraîne la suppression immédiate.</li><li>L'agence se réserve le droit de modérer les annonces.</li></ul></div><div class="terms-section"><h3>3. Obligations du propriétaire</h3><ul><li>Présenter un bien conforme à la description publiée.</li><li>Permettre les visites organisées par l'agence.</li><li>Informer l'agence de toute modification ou retrait.</li><li>Respecter les engagements pris envers les locataires.</li></ul></div><div class="terms-section"><h3>4. Limitation de responsabilité</h3><div class="highlight">F2K IMMO PLUS n'est pas responsable des actes ou manquements des locataires présentés. Le propriétaire assume l'entière responsabilité de son bien.</div></div>`,
+  acheteur:`<div class="terms-section"><h3>1. Principe fondamental</h3><div class="highlight">🔑 <strong>Vous achetez ce que vous voyez.</strong> F2K IMMO PLUS organise la visite. Si vous êtes d'accord, vous procédez au paiement. <strong>Aucun remboursement n'est possible</strong> après confirmation.</div></div><div class="terms-section"><h3>2. Rôle de l'agence</h3><p>F2K IMMO PLUS est un <strong>simple intermédiaire</strong>. Elle met en relation l'acheteur et le vendeur. Elle ne garantit pas la valeur ni l'état futur du bien.</p></div><div class="terms-section"><h3>3. Processus d'achat</h3><ul><li>Consultation de l'annonce.</li><li>Demande de visite auprès de l'agence.</li><li><strong>Visite obligatoire avant tout paiement.</strong></li><li>Accord sur l'état et le prix.</li><li>Paiement et signature des documents.</li><li>Remise des clés / acte de vente.</li></ul></div><div class="terms-section"><h3>4. Non-remboursement</h3><div class="highlight">⚠️ Une fois le paiement effectué et les documents signés, <strong>aucun remboursement ne sera accordé</strong>. L'acheteur reconnaît avoir pris connaissance du bien et l'avoir accepté en toute conscience.</div></div><div class="terms-section"><h3>5. Litiges</h3><p>Tout litige entre acheteur et vendeur est de leur ressort exclusif. F2K IMMO PLUS ne peut être assigné pour la qualité ou valeur d'un bien, mais peut à titre de bonne foi faciliter la médiation.</p></div>`,
+  vendeur:`<div class="terms-section"><h3>1. Conditions de mise en vente</h3><ul><li>Le vendeur certifie être le propriétaire légitime du bien.</li><li>Le bien doit être libre de tout litige judiciaire.</li><li>Les documents de propriété doivent être authentiques et à jour.</li><li>Toute fraude entraîne la suppression du compte et des poursuites légales.</li></ul></div><div class="terms-section"><h3>2. Rôle de l'agence</h3><p>F2K IMMO PLUS publie votre annonce, organise les visites et met en relation avec les acheteurs. Elle est un <strong>intermédiaire</strong> et n'engage pas sa responsabilité sur la transaction finale.</p></div><div class="terms-section"><h3>3. Obligations du vendeur</h3><ul><li>Fournir des informations exactes et complètes.</li><li>Être disponible pour les visites.</li><li>Honorer les prix et conditions annoncés.</li><li>Remettre tous les documents légaux lors de la transaction.</li></ul></div><div class="terms-section"><h3>4. Commission</h3><p>Une commission sera convenue avant la mise en vente. Elle est due à l'agence dès la finalisation de la vente.</p></div><div class="terms-section"><h3>5. Limitation de responsabilité</h3><div class="highlight">F2K IMMO PLUS ne pourra être tenue responsable d'aucun préjudice lié à la transaction. Le vendeur assume l'entière responsabilité juridique et financière de la vente de son bien.</div></div>`
+};
+
+window.openTermsModal = function(tab) {
+  const t = tab || 'locataire';
+  document.querySelectorAll('.tterm-tab').forEach((b,i)=>{
+    b.classList.toggle('active', ['locataire','proprietaire','acheteur','vendeur'][i]===t);
+  });
+  document.getElementById('terms-body').innerHTML = termsData[t]||'';
+  openModal('m-terms');
+};
+window.showTermsTab = function(tab, btn) {
+  if (btn) { document.querySelectorAll('.tterm-tab').forEach(t=>t.classList.remove('active')); btn.classList.add('active'); }
+  document.getElementById('terms-body').innerHTML = termsData[tab]||'';
+};
+
+// ── MODALS ────────────────────────────────────────────────
+window.openModal  = id => { document.getElementById(id).classList.add('open');    document.body.style.overflow='hidden'; };
+window.closeModal = id => { document.getElementById(id).classList.remove('open'); document.body.style.overflow=''; };
+
+// ── INIT ──────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.modal-overlay').forEach(o =>
+    o.addEventListener('click', ev => { if (ev.target===o) closeModal(o.id); })
+  );
+  document.addEventListener('keydown', ev => {
+    if (ev.key==='Escape') document.querySelectorAll('.modal-overlay.open').forEach(m=>closeModal(m.id));
+  });
+  loadListings();
+  setTimeout(() => document.getElementById('loader').classList.add('hide'), 1600);
+});
+
+// ── TOAST ─────────────────────────────────────────────────
+let toastT;
+window.showToast = function(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.remove('show'), 3800);
+};
+</script>
+
 <style>
 :root{--black:#0a0a0a;--white:#f8f7f4;--g100:#f0eeea;--g200:#e0ddd7;--g400:#9e9b95;--g600:#5a5754;--accent:#c8a96e;--alight:#e8d5b0;--adark:#9b7d44;--green:#16a34a;--red:#dc2626;--blue:#2563eb}
 *{margin:0;padding:0;box-sizing:border-box}html{scroll-behavior:smooth}
 body{font-family:'DM Sans',sans-serif;background:var(--white);color:var(--black);overflow-x:hidden}
+
 /* LOADER */
 #loader{position:fixed;inset:0;z-index:9999;background:var(--black);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;transition:opacity .6s ease .3s,visibility .6s ease .3s}
-#loader.hide{opacity:0;visibility:hidden}
+#loader.hide{opacity:0;visibility:hidden;pointer-events:none}
 .loader-logo{font-family:'Playfair Display',serif;font-size:2.2rem;font-weight:700;color:var(--white);letter-spacing:2px;animation:fadePulse 1.2s ease infinite}
 .loader-logo span{color:var(--accent)}
 .loader-bar{width:120px;height:2px;background:var(--g600);border-radius:2px;overflow:hidden}
-.loader-bar::after{content:'';display:block;height:100%;background:var(--accent);animation:loadBar 1.4s ease forwards}
+.loader-bar::after{content:'';display:block;height:100%;background:var(--accent);animation:loadBar 1.6s ease forwards}
 @keyframes loadBar{from{width:0}to{width:100%}}
 @keyframes fadePulse{0%,100%{opacity:1}50%{opacity:.4}}
+
 /* NAV */
-nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:0 40px;display:flex;align-items:center;justify-content:space-between;height:68px;background:rgba(10,10,10,.96);backdrop-filter:blur(12px);border-bottom:1px solid rgba(200,169,110,.15)}
+nav{position:fixed;top:0;left:0;right:0;z-index:100;padding:0 40px;display:flex;align-items:center;justify-content:space-between;height:68px;background:rgba(10,10,10,.97);backdrop-filter:blur(12px);border-bottom:1px solid rgba(200,169,110,.15)}
 .nav-logo{font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;color:var(--white);text-decoration:none;letter-spacing:1.5px;cursor:pointer}
 .nav-logo span{color:var(--accent)}
-.nav-links{display:flex;gap:24px;list-style:none;align-items:center}
-.nav-links a{color:var(--g400);text-decoration:none;font-size:.8rem;font-weight:500;letter-spacing:.5px;text-transform:uppercase;transition:color .25s;cursor:pointer}
-.nav-links a:hover{color:var(--accent)}
-.nav-user{display:flex;align-items:center;gap:10px}
-.nav-btn{padding:8px 16px;border-radius:4px;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.8rem;font-weight:600;transition:all .2s}
+.nav-links{display:flex;gap:20px;list-style:none;align-items:center}
+.nav-links a,.nav-links button{color:var(--g400);text-decoration:none;font-size:.78rem;font-weight:500;letter-spacing:.5px;text-transform:uppercase;transition:color .25s;cursor:pointer;background:none;border:none;font-family:inherit}
+.nav-links a:hover,.nav-links button:hover{color:var(--accent)}
+.nav-right{display:flex;align-items:center;gap:10px}
+.nav-btn{padding:8px 18px;border-radius:4px;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.78rem;font-weight:600;transition:all .2s;letter-spacing:.3px}
 .nav-btn.outline{background:transparent;color:var(--white);border:1px solid rgba(255,255,255,.2)}
 .nav-btn.outline:hover{border-color:var(--accent);color:var(--accent)}
 .nav-btn.fill{background:var(--accent);color:var(--black)}
 .nav-btn.fill:hover{background:var(--adark);color:var(--white)}
-.user-avatar{width:34px;height:34px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:700;color:var(--black);cursor:pointer;border:2px solid var(--alight);position:relative}
+.user-avatar{width:34px;height:34px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:.82rem;font-weight:700;color:var(--black);border:2px solid var(--alight)}
+.username-label{color:var(--g400);font-size:.8rem;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 /* PAGES */
 .page{display:none}.page.active{display:block}
+
 /* HERO */
+#home-page>.hero-section{min-height:100vh;background:var(--black);position:relative;overflow:hidden;display:flex;align-items:center}
 .hero-bg{position:absolute;inset:0;background:radial-gradient(ellipse 60% 60% at 70% 40%,rgba(200,169,110,.12) 0%,transparent 60%),radial-gradient(ellipse 40% 40% at 20% 70%,rgba(200,169,110,.06) 0%,transparent 50%)}
 .hero-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(200,169,110,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(200,169,110,.04) 1px,transparent 1px);background-size:60px 60px}
-.hero-content{position:relative;z-index:2;padding:140px 80px 60px;max-width:760px}
-.hero-tag{display:inline-flex;align-items:center;gap:10px;background:rgba(200,169,110,.12);border:1px solid rgba(200,169,110,.3);border-radius:30px;padding:6px 18px;color:var(--accent);font-size:.78rem;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:24px;animation:fadeUp .8s ease .3s both}
+.hero-content{position:relative;z-index:2;padding:140px 80px 60px;max-width:780px}
+.hero-tag{display:inline-flex;align-items:center;gap:10px;background:rgba(200,169,110,.12);border:1px solid rgba(200,169,110,.3);border-radius:30px;padding:6px 18px;color:var(--accent);font-size:.78rem;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:24px}
 .hero-tag::before{content:'';width:6px;height:6px;background:var(--accent);border-radius:50%}
-.hero-h1{font-family:'Playfair Display',serif;font-size:clamp(2.8rem,5.5vw,5rem);font-weight:900;line-height:1.06;color:var(--white);animation:fadeUp .8s ease .5s both}
+.hero-h1{font-family:'Playfair Display',serif;font-size:clamp(2.8rem,5.5vw,5rem);font-weight:900;line-height:1.06;color:var(--white)}
 .hero-h1 em{color:var(--accent);font-style:normal}
-.hero-sub{margin-top:20px;font-size:1rem;color:var(--g400);line-height:1.7;max-width:500px;animation:fadeUp .8s ease .7s both}
-.hero-actions{margin-top:36px;display:flex;gap:14px;flex-wrap:wrap;animation:fadeUp .8s ease .9s both}
-.btn-primary{background:var(--accent);color:var(--black);border:none;padding:14px 32px;font-family:'DM Sans',sans-serif;font-size:.9rem;font-weight:700;border-radius:4px;cursor:pointer;transition:all .25s;display:inline-block;text-decoration:none}
-.btn-primary:hover{background:var(--adark);color:var(--white);transform:translateY(-2px);box-shadow:0 10px 28px rgba(200,169,110,.3)}
-.btn-outline-w{background:transparent;color:var(--white);border:1px solid rgba(255,255,255,.2);padding:14px 32px;font-family:'DM Sans',sans-serif;font-size:.9rem;font-weight:500;border-radius:4px;cursor:pointer;transition:all .25s;display:inline-block}
-.btn-outline-w:hover{border-color:var(--accent);color:var(--accent)}
-/* Search */
-.search-wrap{position:relative;z-index:2;padding:0 80px 60px;background:var(--black)}
-.search-box{background:rgba(255,255,255,.05);border:1px solid rgba(200,169,110,.25);border-radius:12px;padding:24px 28px;display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap}
-.sf{flex:1;min-width:150px}
-.sf label{display:block;font-size:.72rem;color:var(--accent);font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:7px}
+.hero-sub{margin-top:20px;font-size:1rem;color:var(--g400);line-height:1.7;max-width:500px}
+.hero-actions{margin-top:36px;display:flex;gap:14px;flex-wrap:wrap}
+.hero-stats{position:absolute;right:80px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:20px}
+.stat-card{background:rgba(255,255,255,.04);border:1px solid rgba(200,169,110,.2);border-radius:12px;padding:20px 28px;text-align:center}
+.stat-num{font-family:'Playfair Display',serif;font-size:2.2rem;font-weight:700;color:var(--accent)}
+.stat-label{font-size:.78rem;color:var(--g400);margin-top:4px;letter-spacing:.5px}
+
+/* SEARCH BAR */
+.search-wrap{position:relative;z-index:2;padding:0 80px 50px;background:var(--black)}
+.search-box{background:rgba(255,255,255,.05);border:1px solid rgba(200,169,110,.25);border-radius:12px;padding:22px 26px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}
+.sf{flex:1;min-width:140px}
+.sf label{display:block;font-size:.7rem;color:var(--accent);font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:7px}
 .sf select,.sf input{width:100%;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:11px 14px;color:var(--white);font-family:'DM Sans',sans-serif;font-size:.88rem;outline:none;transition:border-color .25s;-webkit-appearance:none}
-.sf select option{background:#1a1a1a;color:#fff}.sf select:focus,.sf input:focus{border-color:var(--accent)}.sf input::placeholder{color:var(--g600)}
-/* Stats */
-.stats-row{display:flex;gap:0;border-top:1px solid rgba(200,169,110,.15)}
-.stat-item{flex:1;padding:28px 32px;border-right:1px solid rgba(200,169,110,.1);text-align:center}
-.stat-item:last-child{border-right:none}
-.stat-n{font-family:'Playfair Display',serif;font-size:2rem;font-weight:700;color:var(--accent)}
-.stat-l{font-size:.76rem;color:var(--g400);margin-top:3px;letter-spacing:.5px;text-transform:uppercase}
-/* Sections */
-.section{padding:88px 80px}.section.gray{background:var(--g100)}.section.dark{background:var(--black)}
-.slabel{font-size:.72rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:10px;display:block}
-.stitle{font-family:'Playfair Display',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;line-height:1.2;color:var(--black)}
-.stitle.light{color:var(--white)}.ssub{margin-top:14px;color:var(--g600);font-size:.93rem;line-height:1.7;max-width:540px}.ssub.light{color:var(--g400)}
-.sdivider{width:44px;height:3px;background:var(--accent);border-radius:2px;margin:16px 0}.shead{margin-bottom:50px}
-/* Services */
-.srv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(265px,1fr));gap:20px}
-.srv-card{background:var(--white);border:1px solid var(--g200);border-radius:14px;padding:30px 26px;transition:all .3s;cursor:pointer;position:relative;overflow:hidden}
-.srv-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent);transform:scaleX(0);transform-origin:left;transition:transform .3s}
-.srv-card:hover{transform:translateY(-5px);box-shadow:0 20px 50px rgba(0,0,0,.09);border-color:var(--alight)}.srv-card:hover::before{transform:scaleX(1)}
-.srv-icon{width:48px;height:48px;border-radius:10px;background:rgba(200,169,110,.1);display:flex;align-items:center;justify-content:center;font-size:1.4rem;margin-bottom:14px}
-.srv-name{font-family:'Playfair Display',serif;font-size:1.1rem;font-weight:600;color:var(--black);margin-bottom:7px}
-.srv-desc{font-size:.86rem;color:var(--g600);line-height:1.6}
-/* Listings */
-.tabs{display:inline-flex;background:var(--g100);border-radius:8px;padding:4px;margin-bottom:32px}
-.tab{padding:9px 20px;border-radius:6px;border:none;background:transparent;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:500;color:var(--g600);transition:all .25s}
-.tab.active{background:var(--black);color:var(--white)}
-.listings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(295px,1fr));gap:24px}
-.lcard{background:var(--white);border:1px solid var(--g200);border-radius:14px;overflow:hidden;transition:all .3s;cursor:pointer}
-.lcard:hover{transform:translateY(-4px);box-shadow:0 18px 44px rgba(0,0,0,.1);border-color:var(--g400)}
-.lcard-img{width:100%;height:195px;display:flex;align-items:center;justify-content:center;font-size:3rem;position:relative}
-.lcard-img.villa{background:linear-gradient(135deg,#1b4332,#2d6a4f)}.lcard-img.appart{background:linear-gradient(135deg,#1a1a2e,#312e81)}.lcard-img.bureau{background:linear-gradient(135deg,#1c1917,#292524)}.lcard-img.terrain{background:linear-gradient(135deg,#7c2d12,#c2410c)}.lcard-img.service{background:linear-gradient(135deg,#0f172a,#1e3a5f)}
-.lcard-badge{position:absolute;top:12px;left:12px;padding:3px 10px;border-radius:20px;font-size:.7rem;font-weight:700}
-.lcard-badge.vente{background:var(--accent);color:var(--black)}.lcard-badge.location{background:var(--black);color:var(--white)}.lcard-badge.service{background:var(--blue);color:var(--white)}
-.lcard-fav{position:absolute;top:12px;right:12px;width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.15);backdrop-filter:blur(8px);border:none;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center;transition:all .2s}
-.lcard-fav:hover{background:rgba(255,255,255,.3)}
-.lcard-body{padding:18px}
-.lcard-type{font-size:.7rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
-.lcard-title{font-family:'Playfair Display',serif;font-size:1.05rem;font-weight:600;color:var(--black);margin-bottom:4px}
-.lcard-loc{font-size:.8rem;color:var(--g400);margin-bottom:12px}
-.lcard-feats{display:flex;gap:12px;font-size:.78rem;color:var(--g600);margin-bottom:14px;flex-wrap:wrap}
-.lcard-footer{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--g100);padding-top:12px}
-.lcard-price{font-family:'Playfair Display',serif;font-size:1.15rem;font-weight:700;color:var(--black)}
-.lcard-price span{font-size:.74rem;font-weight:400;color:var(--g400)}
-/* Buttons */
-.btn-sm{background:var(--black);color:var(--white);border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:.78rem;font-weight:600;transition:all .2s}
+.sf select option{background:#1a1a1a;color:#fff}
+.sf select:focus,.sf input:focus{border-color:var(--accent)}
+.sf input::placeholder{color:var(--g600)}
+
+/* BUTTONS */
+.btn-primary{background:var(--accent);color:var(--black);border:none;padding:13px 30px;font-family:'DM Sans',sans-serif;font-size:.9rem;font-weight:700;border-radius:4px;cursor:pointer;transition:all .25s;display:inline-block;text-decoration:none;text-align:center}
+.btn-primary:hover{background:var(--adark);color:var(--white);transform:translateY(-2px);box-shadow:0 10px 28px rgba(200,169,110,.3)}
+.btn-outline-w{background:transparent;color:var(--white);border:1px solid rgba(255,255,255,.2);padding:13px 30px;font-family:'DM Sans',sans-serif;font-size:.9rem;font-weight:500;border-radius:4px;cursor:pointer;transition:all .25s}
+.btn-outline-w:hover{border-color:var(--accent);color:var(--accent)}
+.btn-sm{background:var(--black);color:var(--white);border:none;padding:8px 16px;border-radius:5px;cursor:pointer;font-size:.8rem;font-weight:600;transition:all .2s}
 .btn-sm:hover{background:var(--accent);color:var(--black)}
-.btn-danger{background:var(--red);color:var(--white);border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:.78rem;font-weight:600}
-.btn-success{background:var(--green);color:var(--white);border:none;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:.78rem;font-weight:600}
-/* About */
-.about-grid{display:grid;grid-template-columns:1fr 1fr;gap:72px;align-items:center}
-.about-main{width:100%;aspect-ratio:4/3;background:linear-gradient(135deg,#1a2a1a,#0d2b1d);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:5rem;border:1px solid rgba(200,169,110,.2)}
-.about-badge-box{position:absolute;bottom:-20px;right:-20px;background:var(--accent);color:var(--black);border-radius:10px;padding:18px 22px;text-align:center}
-.about-badge-n{font-family:'Playfair Display',serif;font-size:2rem;font-weight:900;display:block}
-.about-badge-t{font-size:.76rem;font-weight:600;margin-top:2px}
-.about-vals{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:26px}
-.val-item{display:flex;gap:10px;align-items:flex-start}
-.val-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);margin-top:6px;flex-shrink:0}
-.val-label{font-size:.86rem;color:var(--white);font-weight:500}
-.val-desc{font-size:.76rem;color:var(--g600);margin-top:2px}
-/* Process */
-.proc-steps{display:grid;grid-template-columns:repeat(4,1fr);gap:26px;position:relative}
-.proc-steps::before{content:'';position:absolute;top:26px;left:12%;right:12%;height:1px;background:linear-gradient(90deg,transparent,var(--accent),var(--accent),transparent)}
+
+/* SECTION */
+section.sec{padding:90px 80px}
+.section-label{font-size:.72rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--accent);margin-bottom:10px;display:block}
+.section-title{font-family:'Playfair Display',serif;font-size:clamp(1.8rem,3.5vw,3rem);font-weight:700;line-height:1.2;color:var(--black)}
+.section-title.light{color:var(--white)}
+.section-sub{margin-top:14px;color:var(--g600);font-size:.95rem;line-height:1.7;max-width:540px}
+.section-sub.light{color:var(--g400)}
+.divider{width:48px;height:3px;background:var(--accent);border-radius:2px;margin:18px 0}
+.sec-header{margin-bottom:52px}
+
+/* SERVICES */
+.services-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:22px}
+.service-card{background:var(--white);border:1px solid var(--g200);border-radius:16px;padding:32px 28px;transition:all .3s;cursor:pointer;position:relative;overflow:hidden}
+.service-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent);transform:scaleX(0);transform-origin:left;transition:transform .3s}
+.service-card:hover{transform:translateY(-5px);box-shadow:0 22px 55px rgba(0,0,0,.1);border-color:var(--alight)}
+.service-card:hover::before{transform:scaleX(1)}
+.service-icon{width:52px;height:52px;border-radius:12px;background:rgba(200,169,110,.1);display:flex;align-items:center;justify-content:center;font-size:1.5rem;margin-bottom:18px}
+.service-name{font-family:'Playfair Display',serif;font-size:1.15rem;font-weight:600;color:var(--black);margin-bottom:8px}
+.service-desc{font-size:.86rem;color:var(--g600);line-height:1.65}
+.service-arrow{display:inline-flex;align-items:center;gap:6px;color:var(--accent);font-size:.82rem;font-weight:600;margin-top:18px;transition:gap .2s}
+.service-card:hover .service-arrow{gap:10px}
+
+/* LISTINGS */
+.tabs{display:inline-flex;gap:4px;background:var(--g100);border-radius:8px;padding:4px;margin-bottom:36px}
+.tab{padding:9px 22px;border-radius:6px;border:none;background:transparent;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.85rem;font-weight:500;color:var(--g600);transition:all .2s}
+.tab.active{background:var(--black);color:var(--white)}
+.listings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:26px}
+.listing-card{background:var(--white);border:1px solid var(--g200);border-radius:16px;overflow:hidden;transition:all .3s}
+.listing-card:hover{transform:translateY(-4px);box-shadow:0 20px 50px rgba(0,0,0,.1)}
+.listing-img{width:100%;height:210px;background:linear-gradient(135deg,#1a1a2e,#16213e);position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:3.2rem}
+.listing-img.villa{background:linear-gradient(135deg,#1b4332,#2d6a4f)}
+.listing-img.appart{background:linear-gradient(135deg,#1a1a2e,#312e81)}
+.listing-img.bureau{background:linear-gradient(135deg,#1c1917,#292524)}
+.listing-img.terrain{background:linear-gradient(135deg,#7c2d12,#c2410c)}
+.listing-badge{position:absolute;top:14px;left:14px;background:var(--accent);color:var(--black);padding:4px 11px;border-radius:20px;font-size:.72rem;font-weight:700;letter-spacing:.5px}
+.listing-badge.loc{background:var(--black);color:var(--white)}
+.listing-fav{position:absolute;top:14px;right:14px;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.15);backdrop-filter:blur(8px);border:none;cursor:pointer;font-size:.95rem;display:flex;align-items:center;justify-content:center;transition:all .2s}
+.listing-fav:hover{background:rgba(255,255,255,.3)}
+.listing-body{padding:22px}
+.listing-type{font-size:.72rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--accent);margin-bottom:5px}
+.listing-title{font-family:'Playfair Display',serif;font-size:1.1rem;font-weight:600;color:var(--black);margin-bottom:5px}
+.listing-loc{font-size:.82rem;color:var(--g400);margin-bottom:14px}
+.listing-features{display:flex;gap:14px;font-size:.8rem;color:var(--g600);margin-bottom:18px;flex-wrap:wrap}
+.listing-footer{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--g100);padding-top:14px}
+.listing-price{font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;color:var(--black)}
+.listing-price span{font-size:.78rem;font-weight:400;color:var(--g400)}
+
+/* ABOUT */
+.about-grid{display:grid;grid-template-columns:1fr 1fr;gap:80px;align-items:center}
+.about-img-main{width:100%;aspect-ratio:4/3;background:linear-gradient(135deg,#1a2a1a,#1d3d2f);border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:5.5rem;border:1px solid rgba(200,169,110,.2)}
+.about-badge{position:absolute;bottom:-20px;right:-20px;background:var(--accent);color:var(--black);border-radius:12px;padding:18px 24px;text-align:center}
+.about-badge-num{font-family:'Playfair Display',serif;font-size:2rem;font-weight:900;display:block}
+.about-badge-text{font-size:.78rem;font-weight:600}
+.about-values{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:28px}
+.value-item{display:flex;gap:12px;align-items:flex-start}
+.value-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);margin-top:5px;flex-shrink:0}
+.value-label{font-size:.88rem;color:var(--white);font-weight:500}
+.value-desc{font-size:.78rem;color:var(--g600);margin-top:2px}
+
+/* PROCESS */
+.process-steps{display:grid;grid-template-columns:repeat(4,1fr);gap:28px;position:relative}
+.process-steps::before{content:'';position:absolute;top:26px;left:10%;right:10%;height:1px;background:linear-gradient(90deg,transparent,var(--accent),var(--accent),transparent)}
 .step{position:relative;z-index:1;text-align:center}
-.step-num{width:52px;height:52px;border-radius:50%;background:var(--black);border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;color:var(--accent);margin:0 auto 16px}
-.step-title{font-family:'Playfair Display',serif;font-size:1rem;font-weight:600;color:var(--black);margin-bottom:7px}
-.step-desc{font-size:.83rem;color:var(--g600);line-height:1.6}
-/* Contact */
-.contact-grid{display:grid;grid-template-columns:1fr 1fr;gap:72px}
-.contact-item{display:flex;gap:14px;align-items:flex-start;margin-bottom:22px}
-.contact-icon{width:40px;height:40px;border-radius:8px;background:rgba(200,169,110,.12);border:1px solid rgba(200,169,110,.2);display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0}
-.clabel{font-size:.7rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--accent);margin-bottom:3px}
-.cval{color:var(--white);font-size:.9rem}.cval a{color:var(--accent);text-decoration:none}
-/* Forms */
-.form{display:flex;flex-direction:column;gap:13px}
-.form-row{display:grid;grid-template-columns:1fr 1fr;gap:13px}
-.fg{display:flex;flex-direction:column;gap:5px}
-.fg label{font-size:.7rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--accent)}
-.fg input,.fg select,.fg textarea{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:7px;padding:11px 13px;color:var(--white);font-family:'DM Sans',sans-serif;font-size:.87rem;outline:none;resize:vertical;transition:border-color .25s;-webkit-appearance:none}
-.fg input::placeholder,.fg textarea::placeholder{color:var(--g600)}.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--accent)}.fg select option{background:#1a1a1a;color:#fff}
-.fg.light input,.fg.light select,.fg.light textarea{background:var(--g100);border-color:var(--g200);color:var(--black)}
-.fg.light label{color:var(--g600)}.fg.light input::placeholder,.fg.light textarea::placeholder{color:var(--g400)}.fg.light select option{background:#fff;color:#000}.fg.light input:focus,.fg.light select:focus,.fg.light textarea:focus{border-color:var(--accent)}
-/* Footer */
-footer{background:#050505;padding:52px 80px 26px;border-top:1px solid rgba(200,169,110,.15)}
-.footer-top{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:48px;margin-bottom:40px}
-.fb-name{font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;color:var(--white);margin-bottom:9px}
-.fb-name span{color:var(--accent)}.fb-desc{font-size:.85rem;color:var(--g600);line-height:1.7}
-.fc-title{font-size:.7rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin-bottom:14px}
-.footer-links{list-style:none;display:flex;flex-direction:column;gap:8px}
-.footer-links a{color:var(--g600);text-decoration:none;font-size:.84rem;transition:color .2s;cursor:pointer}.footer-links a:hover{color:var(--white)}
-.footer-bottom{border-top:1px solid rgba(255,255,255,.07);padding-top:20px;display:flex;align-items:center;justify-content:space-between;font-size:.78rem;color:var(--g600);flex-wrap:wrap;gap:10px}
-/* Modal */
-.modal-overlay{position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.76);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:20px;opacity:0;visibility:hidden;transition:all .3s}
-.modal-overlay.open{opacity:1;visibility:visible}
-.modal{background:var(--white);border-radius:18px;padding:34px;max-width:580px;width:100%;transform:translateY(20px);transition:transform .3s;max-height:90vh;overflow-y:auto;position:relative}
-.modal-overlay.open .modal{transform:translateY(0)}
-.mhead{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:22px}
-.mtitle{font-family:'Playfair Display',serif;font-size:1.45rem;font-weight:700;color:var(--black)}
-.mclose{background:none;border:none;font-size:1.3rem;cursor:pointer;color:var(--g400);transition:color .2s;padding:4px}.mclose:hover{color:var(--black)}
-/* Auth tabs */
-.auth-tabs{display:flex;border-bottom:1px solid var(--g200);margin-bottom:22px}
-.auth-tab{flex:1;padding:11px;background:none;border:none;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.86rem;font-weight:600;color:var(--g400);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .25s}
-.auth-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
-/* Admin */
-#pg-admin{padding:68px 0 0;min-height:100vh;background:var(--g100)}
-.admin-wrap{display:grid;grid-template-columns:230px 1fr;min-height:calc(100vh - 68px)}
-.admin-sidebar{background:var(--black);padding:24px 0;border-right:1px solid rgba(200,169,110,.15)}
+.step-num{width:52px;height:52px;border-radius:50%;background:var(--black);border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;color:var(--accent);margin:0 auto 18px}
+.step-title{font-family:'Playfair Display',serif;font-size:1.05rem;font-weight:600;color:var(--black);margin-bottom:8px}
+.step-desc{font-size:.85rem;color:var(--g600);line-height:1.6}
+
+/* CONTACT */
+.contact-grid{display:grid;grid-template-columns:1fr 1fr;gap:80px}
+.contact-item{display:flex;gap:14px;align-items:flex-start;margin-bottom:24px}
+.contact-icon{width:42px;height:42px;border-radius:8px;background:rgba(200,169,110,.12);border:1px solid rgba(200,169,110,.2);display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0}
+.contact-label{font-size:.7rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
+.contact-val{color:var(--white);font-size:.9rem}
+.contact-val a{color:var(--accent);text-decoration:none}
+.form-group{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.form-group label{font-size:.7rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--accent)}
+.form-group input,.form-group select,.form-group textarea{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:12px 14px;color:var(--white);font-family:'DM Sans',sans-serif;font-size:.88rem;outline:none;resize:vertical;transition:border-color .25s;-webkit-appearance:none}
+.form-group input::placeholder,.form-group textarea::placeholder{color:var(--g600)}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:var(--accent)}
+.form-group select option{background:#1a1a1a}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+
+/* FOOTER */
+footer{background:#050505;padding:56px 80px 28px;border-top:1px solid rgba(200,169,110,.15)}
+.footer-top{display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:56px;margin-bottom:44px}
+.footer-brand-name{font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;color:var(--white);margin-bottom:10px}
+.footer-brand-name span{color:var(--accent)}
+.footer-brand-desc{font-size:.86rem;color:var(--g600);line-height:1.7}
+.footer-col-title{font-size:.72rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin-bottom:16px}
+.footer-links{list-style:none;display:flex;flex-direction:column;gap:9px}
+.footer-links a,.footer-links button{color:var(--g600);text-decoration:none;font-size:.86rem;transition:color .2s;cursor:pointer;background:none;border:none;font-family:inherit;text-align:left}
+.footer-links a:hover,.footer-links button:hover{color:var(--white)}
+.footer-bottom{border-top:1px solid rgba(255,255,255,.07);padding-top:22px;display:flex;align-items:center;justify-content:space-between;font-size:.8rem;color:var(--g600);flex-wrap:wrap;gap:10px}
+
+/* ADMIN PAGE */
+#adm-page{min-height:100vh;background:var(--g100);padding-top:68px}
+.adm-layout{display:grid;grid-template-columns:240px 1fr;min-height:calc(100vh - 68px)}
+.adm-sidebar{background:var(--black);padding:32px 0;border-right:1px solid rgba(200,169,110,.15)}
+.adm-sidebar-title{font-family:'Playfair Display',serif;font-size:1rem;color:var(--accent);padding:0 24px;margin-bottom:24px;letter-spacing:1px}
 .adm-menu{list-style:none}
-.adm-menu li a{display:flex;align-items:center;gap:10px;padding:12px 22px;color:var(--g400);text-decoration:none;font-size:.84rem;font-weight:500;transition:all .2s;cursor:pointer;border-right:3px solid transparent}
-.adm-menu li a:hover,.adm-menu li a.active-adm{color:var(--accent);background:rgba(200,169,110,.07);border-right-color:var(--accent)}
-.adm-menu li a span{font-size:.95rem}
-.admin-content{padding:32px 36px;overflow-y:auto}
-.admin-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px}
-.admin-page-title{font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700;color:var(--black)}
-.stat-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-bottom:28px}
-.stat-card{background:var(--white);border:1px solid var(--g200);border-radius:12px;padding:22px;transition:all .2s}
-.stat-card:hover{box-shadow:0 6px 20px rgba(0,0,0,.07)}
-.sc-icon{font-size:1.6rem;margin-bottom:9px}.sc-num{font-family:'Playfair Display',serif;font-size:1.7rem;font-weight:700;color:var(--black)}.sc-label{font-size:.78rem;color:var(--g400);margin-top:2px}
-.data-table{width:100%;border-collapse:collapse;background:var(--white);border-radius:12px;overflow:hidden;border:1px solid var(--g200)}
-.data-table th{background:var(--black);color:var(--white);padding:12px 14px;text-align:left;font-size:.76rem;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
-.data-table td{padding:11px 14px;border-bottom:1px solid var(--g100);font-size:.84rem;color:var(--black);vertical-align:middle}
-.data-table tr:last-child td{border-bottom:none}.data-table tr:hover td{background:var(--g100)}
-.badge{display:inline-block;padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:700;letter-spacing:.3px}
-.badge.vente{background:rgba(200,169,110,.15);color:var(--adark)}.badge.location{background:rgba(37,99,235,.12);color:var(--blue)}.badge.service{background:rgba(22,163,74,.12);color:var(--green)}.badge.admin-b{background:rgba(220,38,38,.1);color:var(--red)}.badge.ok{background:rgba(22,163,74,.1);color:var(--green)}
-/* Profile */
-#pg-profile{padding:88px 80px 60px;min-height:100vh}
-.profile-grid{display:grid;grid-template-columns:270px 1fr;gap:36px;margin-top:28px}
-.profile-card{background:var(--white);border:1px solid var(--g200);border-radius:14px;padding:28px;text-align:center;height:fit-content}
-.profile-avatar{width:76px;height:76px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:1.7rem;font-weight:700;color:var(--black);margin:0 auto 14px;border:3px solid var(--alight)}
-.profile-name{font-family:'Playfair Display',serif;font-size:1.2rem;font-weight:700;margin-bottom:3px}
-.profile-role{font-size:.78rem;color:var(--accent);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-bottom:13px}
-.profile-stat{display:flex;justify-content:space-around;border-top:1px solid var(--g100);padding-top:14px;margin-top:14px}
-.ps-num{font-family:'Playfair Display',serif;font-size:1.3rem;font-weight:700;color:var(--black);display:block}.ps-label{font-size:.72rem;color:var(--g400)}
-.profile-main{display:flex;flex-direction:column;gap:22px}
-.pcard{background:var(--white);border:1px solid var(--g200);border-radius:14px;padding:24px}
-.pcard-title{font-family:'Playfair Display',serif;font-size:1rem;font-weight:600;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--g100)}
-/* Terms */
+.adm-menu li a{display:flex;align-items:center;gap:10px;padding:12px 24px;color:var(--g400);text-decoration:none;font-size:.86rem;font-weight:500;transition:all .2s;cursor:pointer;border-left:3px solid transparent}
+.adm-menu li a:hover{color:var(--white);background:rgba(255,255,255,.05)}
+.adm-menu li a.active-adm{color:var(--accent);border-left-color:var(--accent);background:rgba(200,169,110,.08)}
+.adm-main{padding:40px}
+.adm-tab-content{display:none}.adm-tab-content.active{display:block}
+.adm-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-bottom:36px}
+.adm-stat{background:var(--white);border-radius:12px;padding:24px;text-align:center;border:1px solid var(--g200)}
+.adm-stat-num{font-family:'Playfair Display',serif;font-size:2rem;font-weight:700;color:var(--accent)}
+.adm-stat-label{font-size:.78rem;color:var(--g400);margin-top:4px}
+.adm-card{background:var(--white);border-radius:12px;padding:28px;border:1px solid var(--g200);margin-bottom:28px}
+.adm-card h3{font-family:'Playfair Display',serif;font-size:1.2rem;margin-bottom:20px;color:var(--black)}
+.adm-table{width:100%;border-collapse:collapse;font-size:.86rem}
+.adm-table th{text-align:left;padding:10px 14px;border-bottom:2px solid var(--g200);font-size:.72rem;text-transform:uppercase;letter-spacing:1px;color:var(--g400)}
+.adm-table td{padding:10px 14px;border-bottom:1px solid var(--g100);color:var(--black)}
+.adm-table tr:hover td{background:var(--g100)}
+.adm-btn-del{background:none;border:none;cursor:pointer;font-size:1rem;padding:4px 8px;border-radius:4px;transition:background .2s}
+.adm-btn-del:hover{background:#fee2e2}
+.form-group-adm{margin-bottom:14px}
+.form-group-adm label{display:block;font-size:.72rem;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--g600);margin-bottom:6px}
+.form-group-adm input,.form-group-adm select,.form-group-adm textarea{width:100%;border:1px solid var(--g200);border-radius:6px;padding:10px 13px;color:var(--black);font-family:'DM Sans',sans-serif;font-size:.88rem;outline:none;background:var(--white);-webkit-appearance:none;transition:border-color .2s}
+.form-group-adm input:focus,.form-group-adm select:focus,.form-group-adm textarea:focus{border-color:var(--accent)}
+.form-row-adm{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.badge-role{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:600}
+.badge-role.locataire{background:#dbeafe;color:#1d4ed8}
+.badge-role.proprietaire{background:#dcfce7;color:#15803d}
+.badge-role.acheteur{background:#fef9c3;color:#854d0e}
+.badge-role.vendeur{background:#fce7f3;color:#9d174d}
+
+/* LISTINGS PAGE */
+#listings-page{padding-top:68px;min-height:100vh}
+.listings-page-header{background:var(--black);padding:60px 80px 40px}
+.listings-page-search{background:rgba(255,255,255,.05);border:1px solid rgba(200,169,110,.2);border-radius:10px;padding:20px 24px;display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-top:28px}
+
+/* MODAL */
+.modal-overlay{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.72);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:16px;opacity:0;visibility:hidden;transition:all .3s}
+.modal-overlay.open{opacity:1;visibility:visible}
+.modal{background:var(--white);border-radius:20px;padding:36px;max-width:540px;width:100%;transform:translateY(20px);transition:transform .3s;max-height:90vh;overflow-y:auto}
+.modal-overlay.open .modal{transform:translateY(0)}
+.modal-lg{max-width:720px}
+.modal-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:24px}
+.modal-title{font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:700}
+.modal-close{background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--g400);transition:color .2s;padding:4px}
+.modal-close:hover{color:var(--black)}
+.modal-dark .modal{background:var(--black);color:var(--white)}
+.modal-dark .modal-title{color:var(--white)}
+.modal-dark .form-group input,.modal-dark .form-group select,.modal-dark .form-group textarea{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.1);color:var(--white)}
+.modal-dark .form-group label{color:var(--accent)}
+
+/* TERMS MODAL */
+.tterm-tabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:24px;background:var(--g100);border-radius:8px;padding:4px}
+.tterm-tab{padding:8px 16px;border-radius:5px;border:none;background:transparent;cursor:pointer;font-family:'DM Sans',sans-serif;font-size:.8rem;font-weight:500;color:var(--g600);transition:all .2s}
+.tterm-tab.active{background:var(--black);color:var(--white)}
 .terms-section{margin-bottom:24px}
-.terms-section h3{font-family:'Playfair Display',serif;font-size:1rem;font-weight:600;color:var(--black);margin-bottom:9px;padding-bottom:5px;border-bottom:2px solid var(--accent);display:inline-block}
-.terms-section p,.terms-section li{font-size:.86rem;color:var(--g600);line-height:1.75;margin-bottom:7px}.terms-section ul{padding-left:18px}
-.terms-section .highlight{background:rgba(200,169,110,.1);border-left:3px solid var(--accent);padding:11px 14px;border-radius:4px;color:var(--black);font-weight:500;font-size:.86rem;margin:10px 0}
-.terms-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:22px}
-.tterm-tab{padding:8px 14px;border-radius:6px;border:1px solid var(--g200);background:var(--g100);cursor:pointer;font-size:.78rem;font-weight:600;transition:all .2s;color:var(--g600)}
-.tterm-tab.active{background:var(--black);color:var(--white);border-color:var(--black)}
-/* Emoji picker */
-.img-select-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:7px}
-.img-opt{border:2px solid var(--g200);border-radius:8px;padding:10px 4px;text-align:center;cursor:pointer;transition:all .2s;font-size:1.5rem}
-.img-opt span{display:block;font-size:.68rem;color:var(--g400);margin-top:3px}
-.img-opt.selected{border-color:var(--accent);background:rgba(200,169,110,.08)}
-/* Toast */
-.toast{position:fixed;bottom:26px;right:26px;z-index:9999;background:var(--black);color:var(--white);padding:13px 20px;border-radius:10px;border-left:4px solid var(--accent);font-size:.86rem;font-weight:500;transform:translateY(80px);opacity:0;transition:all .4s ease;max-width:290px}
+.terms-section h3{font-family:'Playfair Display',serif;font-size:1.05rem;margin-bottom:10px;color:var(--black)}
+.terms-section p,.terms-section ul{font-size:.88rem;color:var(--g600);line-height:1.7}
+.terms-section ul{padding-left:18px}
+.terms-section ul li{margin-bottom:6px}
+.highlight{background:#fff8ee;border-left:3px solid var(--accent);padding:12px 16px;border-radius:4px;font-size:.86rem;color:var(--g600);margin:12px 0}
+
+/* TOAST */
+.toast{position:fixed;bottom:28px;right:28px;z-index:999;background:var(--black);color:var(--white);padding:14px 22px;border-radius:10px;border-left:4px solid var(--accent);font-size:.88rem;font-weight:500;transform:translateY(80px);opacity:0;transition:all .4s;max-width:300px}
 .toast.show{transform:translateY(0);opacity:1}
-/* WA */
-.wa-btn{position:fixed;bottom:26px;left:26px;z-index:300;width:52px;height:52px;border-radius:50%;background:#25D366;color:#fff;display:flex;align-items:center;justify-content:center;font-size:1.4rem;text-decoration:none;box-shadow:0 8px 24px rgba(37,211,102,.4);transition:transform .2s,box-shadow .2s}
-.wa-btn:hover{transform:scale(1.1)}
-/* Anims */
-@keyframes fadeUp{from{opacity:0;transform:translateY(28px)}to{opacity:1;transform:translateY(0)}}
-.fade-in{opacity:0;transform:translateY(20px);transition:opacity .6s ease,transform .6s ease}.fade-in.visible{opacity:1;transform:translateY(0)}
-/* Responsive */
-@media(max-width:1024px){nav{padding:0 20px}.hero-content,.search-wrap{padding-left:24px;padding-right:24px}.section{padding:68px 24px}.contact-grid,.about-grid{grid-template-columns:1fr;gap:36px}.proc-steps{grid-template-columns:1fr 1fr}.proc-steps::before{display:none}.footer-top{grid-template-columns:1fr 1fr;gap:28px}footer{padding:36px 24px 22px}.admin-wrap{grid-template-columns:1fr}.admin-sidebar{display:none}.stat-cards{grid-template-columns:1fr 1fr}#pg-profile{padding:88px 24px 60px}.profile-grid{grid-template-columns:1fr}}
-@media(max-width:640px){.nav-links{display:none}.hero-h1{font-size:2.4rem}.hero-actions,.form-row{flex-direction:column}.form-row{grid-template-columns:1fr}.stat-cards{grid-template-columns:1fr 1fr}.footer-top{grid-template-columns:1fr}.footer-bottom{flex-direction:column;text-align:center}.stats-row{flex-direction:column}.stat-item{border-right:none;border-bottom:1px solid rgba(200,169,110,.1)}}
+
+/* WHATSAPP FLOAT */
+.wa-float{position:fixed;bottom:28px;left:28px;z-index:300;width:54px;height:54px;border-radius:50%;background:#25D366;color:#fff;display:flex;align-items:center;justify-content:center;font-size:1.5rem;text-decoration:none;box-shadow:0 6px 22px rgba(37,211,102,.4);transition:transform .2s,box-shadow .2s}
+.wa-float:hover{transform:scale(1.1);box-shadow:0 10px 30px rgba(37,211,102,.5)}
+
+/* REGISTER FORM */
+.role-cards{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+.role-card{border:2px solid var(--g200);border-radius:10px;padding:14px;cursor:pointer;transition:all .2s;text-align:center}
+.role-card:hover{border-color:var(--accent)}
+.role-card input{display:none}
+.role-card.selected{border-color:var(--accent);background:#fff8ee}
+.role-card-icon{font-size:1.6rem;margin-bottom:6px}
+.role-card-label{font-size:.82rem;font-weight:600;color:var(--black)}
+.role-card-desc{font-size:.75rem;color:var(--g400);margin-top:2px}
+
+/* ANIMATIONS */
+@keyframes fadeUp{from{opacity:0;transform:translateY(26px)}to{opacity:1;transform:translateY(0)}}
+
+/* RESPONSIVE */
+@media(max-width:1024px){
+  .hero-content,.search-wrap,.sec,.listings-page-header,footer{padding-left:24px;padding-right:24px}
+  .hero-stats{display:none}
+  .about-grid,.contact-grid{grid-template-columns:1fr;gap:40px}
+  .process-steps{grid-template-columns:1fr 1fr}
+  .process-steps::before{display:none}
+  .footer-top{grid-template-columns:1fr 1fr;gap:36px}
+  .adm-layout{grid-template-columns:1fr}
+  .adm-sidebar{display:flex;overflow-x:auto;padding:12px 0}
+  .adm-stats{grid-template-columns:1fr 1fr}
+}
+@media(max-width:640px){
+  .nav-links{display:none}
+  .hero-h1{font-size:2.4rem}
+  .hero-actions{flex-direction:column}
+  .btn-primary,.btn-outline-w{width:100%;text-align:center}
+  .process-steps{grid-template-columns:1fr}
+  .footer-top{grid-template-columns:1fr}
+  .footer-bottom{flex-direction:column;text-align:center}
+  .form-row{grid-template-columns:1fr}
+  .form-row-adm{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
 
-<div id="loader"><div class="loader-logo">F2K <span>IMMO</span> PLUS</div><div class="loader-bar"></div></div>
+<!-- ═══════════════════ LOADER ═══════════════════ -->
+<div id="loader">
+  <div class="loader-logo">F2K <span>IMMO</span> PLUS</div>
+  <div class="loader-bar"></div>
+</div>
 
-<!-- NAV -->
+<!-- ═══════════════════ NAV ═══════════════════ -->
 <nav>
-  <a class="nav-logo" onclick="showPage('home')">F2K <span>IMMO</span> PLUS</a>
+  <div class="nav-logo" onclick="showPage('home-page')">F2K <span>IMMO</span> PLUS</div>
   <ul class="nav-links">
-    <li><a onclick="showPage('home');scrollSec('#services')">Services</a></li>
-    <li><a onclick="showPage('home');scrollSec('#listings')">Biens</a></li>
-    <li><a onclick="showPage('home');scrollSec('#about')">À propos</a></li>
+    <li><a onclick="showPage('home-page')">Accueil</a></li>
+    <li><a onclick="showPage('listings-page')">Biens</a></li>
+    <li><a onclick="document.getElementById('services-sec')?.scrollIntoView({behavior:'smooth'})">Services</a></li>
     <li><a onclick="openTermsModal('locataire')">Conditions</a></li>
-    <li><a onclick="showPage('home');scrollSec('#contact')">Contact</a></li>
+    <li><a onclick="document.getElementById('contact-sec')?.scrollIntoView({behavior:'smooth'})">Contact</a></li>
   </ul>
-  <div class="nav-user" id="nav-user">
-    <button class="nav-btn outline" onclick="openAuthModal('login')">Connexion</button>
-    <button class="nav-btn fill" onclick="openAuthModal('register')">S'inscrire</button>
+  <div class="nav-right">
+    <!-- Guest -->
+    <div id="nav-guest" style="display:flex;gap:8px">
+      <button class="nav-btn outline" onclick="openModal('m-login')">Connexion</button>
+      <button class="nav-btn fill" onclick="openModal('m-register')">S'inscrire</button>
+    </div>
+    <!-- Logged in user -->
+    <div id="nav-user" style="display:none;align-items:center;gap:10px">
+      <button id="nav-publish-btn" class="nav-btn fill" style="display:none;background:var(--green);color:#fff" onclick="openModal('m-publish')">➕ Publier un bien</button>
+      <div class="user-avatar" id="nav-avatar-name">U</div>
+      <span class="username-label" id="nav-username">Utilisateur</span>
+      <button class="nav-btn outline" onclick="doLogout()">Quitter</button>
+    </div>
+    <!-- Admin link -->
+    <div id="nav-adm" style="display:none">
+      <button class="nav-btn fill" onclick="showPage('adm-page')" style="background:#dc2626;color:#fff;margin-left:8px">⚙️ Admin</button>
+    </div>
   </div>
 </nav>
 
-<!-- ═══ HOME ═══ -->
-<div id="pg-home" class="page active">
-  <section style="background:var(--black);min-height:100vh;position:relative;overflow:hidden;display:flex;flex-direction:column">
-    <div class="hero-bg"></div><div class="hero-grid"></div>
+<!-- ══════════════════════════════════════════════════════════
+     HOME PAGE
+══════════════════════════════════════════════════════════ -->
+<div id="home-page" class="page active">
+
+  <!-- HERO -->
+  <div class="hero-section">
+    <div class="hero-bg"></div>
+    <div class="hero-grid"></div>
     <div class="hero-content">
-      <div class="hero-tag">Agence Immobilière &amp; Services — Bénin</div>
+      <div class="hero-tag">Agence Immobilière & Services — Bénin</div>
       <h1 class="hero-h1">Votre <em>partenaire</em><br>immobilier<br>de confiance</h1>
-      <p class="hero-sub">F2K IMMO PLUS vous accompagne dans tous vos projets — vente, location, gestion locative, entretien, déménagement et plus encore.</p>
+      <p class="hero-sub">F2K IMMO PLUS vous accompagne dans tous vos projets immobiliers — vente, location, gestion locative, entretien et bien plus encore.</p>
       <div class="hero-actions">
-        <button class="btn-primary" onclick="scrollSec('#listings')">Voir les biens</button>
-        <button class="btn-outline-w" onclick="openAuthModal('register')">Publier un bien</button>
+        <button class="btn-primary" onclick="showPage('listings-page')">Voir nos biens</button>
+        <button class="btn-outline-w" onclick="document.getElementById('contact-sec').scrollIntoView({behavior:'smooth'})">Nous contacter</button>
       </div>
     </div>
-    <div class="search-wrap">
-      <div class="search-box">
-        <div class="sf"><label>Type</label><select id="s-type"><option value="">Tous</option><option>Villa</option><option>Appartement</option><option>Bureau</option><option>Terrain</option><option>Local commercial</option><option>Service</option></select></div>
-        <div class="sf"><label>Transaction</label><select id="s-trans"><option value="">Vente &amp; Location</option><option value="vente">Vente</option><option value="location">Location</option><option value="service">Service</option></select></div>
-        <div class="sf"><label>Localisation</label><input type="text" id="s-loc" placeholder="Quartier, ville..."></div>
-        <div class="sf"><label>Budget max (FCFA)</label><input type="text" id="s-budget" placeholder="Ex: 50 000 000"></div>
-        <button class="btn-primary" style="height:46px;align-self:flex-end;white-space:nowrap" onclick="doSearch()">🔍 Rechercher</button>
+    <div class="hero-stats">
+      <div class="stat-card"><div class="stat-num" id="home-stat-listings">—</div><div class="stat-label">Biens disponibles</div></div>
+      <div class="stat-card"><div class="stat-num">98%</div><div class="stat-label">Satisfaction client</div></div>
+      <div class="stat-card"><div class="stat-num">10+</div><div class="stat-label">Ans d'expérience</div></div>
+    </div>
+  </div>
+
+  <!-- SEARCH -->
+  <div class="search-wrap">
+    <div class="search-box">
+      <div class="sf">
+        <label>Type de bien</label>
+        <select id="search-type">
+          <option value="">Tous</option>
+          <option>Villa</option><option>Appartement</option><option>Bureau</option>
+          <option>Terrain</option><option>Local commercial</option><option>Maison</option>
+        </select>
       </div>
+      <div class="sf">
+        <label>Transaction</label>
+        <select id="search-trans">
+          <option value="">Tous</option>
+          <option value="vente">Vente</option>
+          <option value="location">Location</option>
+        </select>
+      </div>
+      <div class="sf">
+        <label>Localisation</label>
+        <input type="text" id="search-loc" placeholder="Quartier, ville...">
+      </div>
+      <div class="sf">
+        <label>Mot-clé</label>
+        <input type="text" id="search-q" placeholder="Villa, bureau...">
+      </div>
+      <button class="btn-primary" onclick="doSearch()">🔍 Rechercher</button>
     </div>
-    <div class="stats-row">
-      <div class="stat-item"><div class="stat-n" id="stat-biens">0</div><div class="stat-l">Biens disponibles</div></div>
-      <div class="stat-item"><div class="stat-n" id="stat-users">0</div><div class="stat-l">Membres inscrits</div></div>
-      <div class="stat-item"><div class="stat-n">98%</div><div class="stat-l">Satisfaction client</div></div>
-      <div class="stat-item"><div class="stat-n">10+</div><div class="stat-l">Années d'expérience</div></div>
-    </div>
-  </section>
+  </div>
 
   <!-- SERVICES -->
-  <section id="services" class="section gray">
-    <div class="shead fade-in"><span class="slabel">Ce que nous offrons</span><h2 class="stitle">Nos Services</h2><div class="sdivider"></div><p class="ssub">Une gamme complète de services immobiliers pour simplifier votre vie.</p></div>
-    <div class="srv-grid">
-      <div class="srv-card fade-in" onclick="openSrvModal('vente')"><div class="srv-icon">🏠</div><div class="srv-name">Vente Immobilière</div><p class="srv-desc">Acquisition et cession de biens résidentiels et commerciaux. Accompagnement complet.</p></div>
-      <div class="srv-card fade-in" onclick="openSrvModal('location')"><div class="srv-icon">🔑</div><div class="srv-name">Location</div><p class="srv-desc">Large sélection de logements et bureaux à louer. Processus simplifié et transparent.</p></div>
-      <div class="srv-card fade-in" onclick="openSrvModal('gestion')"><div class="srv-icon">📋</div><div class="srv-name">Gestion Locative</div><p class="srv-desc">Confiez votre patrimoine à nos experts. Suivi des loyers et locataires.</p></div>
-      <div class="srv-card fade-in" onclick="openSrvModal('entretien')"><div class="srv-icon">🧹</div><div class="srv-name">Entretien Bureaux &amp; Maisons</div><p class="srv-desc">Services professionnels de nettoyage pour particuliers et entreprises.</p></div>
-      <div class="srv-card fade-in" onclick="openSrvModal('demenagement')"><div class="srv-icon">🚚</div><div class="srv-name">Déménagement</div><p class="srv-desc">Organisation complète de votre déménagement. Transport sécurisé et installation rapide.</p></div>
-      <div class="srv-card fade-in" onclick="openSrvModal('notaire')"><div class="srv-icon">⚖️</div><div class="srv-name">Services Notariaux</div><p class="srv-desc">Mise en relation avec des notaires partenaires pour sécuriser vos transactions.</p></div>
+  <section class="sec" id="services-sec" style="background:var(--g100)">
+    <div class="sec-header">
+      <span class="section-label">Ce que nous offrons</span>
+      <h2 class="section-title">Nos Services</h2>
+      <div class="divider"></div>
+      <p class="section-sub">Une gamme complète de services immobiliers et d'entretien.</p>
+    </div>
+    <div class="services-grid">
+      <div class="service-card" onclick="openSrvModal('vente')">
+        <div class="service-icon">🏠</div>
+        <div class="service-name">Vente Immobilière</div>
+        <p class="service-desc">Acquisition et cession de biens résidentiels et commerciaux. Accompagnement complet.</p>
+        <span class="service-arrow">En savoir plus →</span>
+      </div>
+      <div class="service-card" onclick="openSrvModal('location')">
+        <div class="service-icon">🔑</div>
+        <div class="service-name">Location</div>
+        <p class="service-desc">Large sélection de logements et bureaux. Processus simplifié, contrats clairs.</p>
+        <span class="service-arrow">En savoir plus →</span>
+      </div>
+      <div class="service-card" onclick="openSrvModal('gestion')">
+        <div class="service-icon">📋</div>
+        <div class="service-name">Gestion Locative</div>
+        <p class="service-desc">Confiez votre patrimoine. Suivi des loyers, locataires et entretien.</p>
+        <span class="service-arrow">En savoir plus →</span>
+      </div>
+      <div class="service-card" onclick="openSrvModal('entretien')">
+        <div class="service-icon">🧹</div>
+        <div class="service-name">Entretien Bureaux & Maisons</div>
+        <p class="service-desc">Nettoyage et entretien professionnel pour particuliers et entreprises.</p>
+        <span class="service-arrow">En savoir plus →</span>
+      </div>
+      <div class="service-card" onclick="openSrvModal('demenagement')">
+        <div class="service-icon">🚚</div>
+        <div class="service-name">Déménagement</div>
+        <p class="service-desc">Organisation complète : transport sécurisé, emballage soigné, installation rapide.</p>
+        <span class="service-arrow">En savoir plus →</span>
+      </div>
+      <div class="service-card" onclick="openSrvModal('notaire')">
+        <div class="service-icon">⚖️</div>
+        <div class="service-name">Services Notariaux</div>
+        <p class="service-desc">Mise en relation avec nos notaires partenaires pour sécuriser vos transactions.</p>
+        <span class="service-arrow">En savoir plus →</span>
+      </div>
     </div>
   </section>
 
-  <!-- LISTINGS -->
-  <section id="listings" class="section">
-    <div class="shead fade-in"><span class="slabel">Nos annonces</span><h2 class="stitle">Biens &amp; Services Disponibles</h2><div class="sdivider"></div></div>
-    <div class="tabs">
-      <button class="tab active" onclick="filterTab(this,'tous')">Tous</button>
-      <button class="tab" onclick="filterTab(this,'vente')">À Vendre</button>
-      <button class="tab" onclick="filterTab(this,'location')">À Louer</button>
-      <button class="tab" onclick="filterTab(this,'service')">Services</button>
+  <!-- LISTINGS PREVIEW -->
+  <section class="sec">
+    <div class="sec-header" style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:20px">
+      <div>
+        <span class="section-label">Nos annonces</span>
+        <h2 class="section-title">Biens Disponibles</h2>
+        <div class="divider"></div>
+      </div>
+      <button class="btn-primary" onclick="showPage('listings-page')">Voir tout →</button>
     </div>
-    <div class="listings-grid" id="listings-grid"></div>
-    <div style="text-align:center;margin-top:40px" class="fade-in">
-      <button class="btn-primary" onclick="openAddListing()">+ Publier votre bien ou service</button>
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab(this,'tous')">Tous</button>
+      <button class="tab" onclick="switchTab(this,'vente')">À Vendre</button>
+      <button class="tab" onclick="switchTab(this,'location')">À Louer</button>
+    </div>
+    <div class="listings-grid" id="home-listings-grid">
+      <div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--g400)">Chargement des annonces...</div>
     </div>
   </section>
 
   <!-- ABOUT -->
-  <section id="about" class="section dark">
+  <section class="sec" style="background:var(--black)">
     <div class="about-grid">
-      <div style="position:relative" class="fade-in">
-        <div class="about-main">🏗️</div>
-        <div class="about-badge-box"><span class="about-badge-n">10+</span><span class="about-badge-t">Années d'expérience</span></div>
+      <div style="position:relative">
+        <div class="about-img-main">🏗️</div>
+        <div class="about-badge">
+          <span class="about-badge-num">10+</span>
+          <span class="about-badge-text">Ans d'expérience</span>
+        </div>
       </div>
       <div>
-        <span class="slabel">Qui sommes-nous</span>
-        <h2 class="stitle light">F2K IMMO PLUS,<br>votre agence de confiance</h2>
-        <div class="sdivider"></div>
-        <div style="color:var(--g400);font-size:.9rem;line-height:1.8" class="fade-in">
-          <p style="margin-bottom:12px">F2K IMMO PLUS est une agence immobilière et de services fondée sur des valeurs d'intégrité et de professionnalisme. Nous accompagnons nos clients dans tous leurs projets immobiliers.</p>
-          <p>Nous jouons le rôle d'<strong style="color:var(--accent)">intermédiaire</strong> entre acheteurs, vendeurs, locataires et propriétaires. Nous vous montrons le bien, vous validez, puis la transaction s'effectue. <strong style="color:var(--white)">Aucun remboursement</strong> n'est possible une fois la transaction confirmée.</p>
-        </div>
-        <div class="about-vals">
-          <div class="val-item"><div class="val-dot"></div><div><div class="val-label">Transparence totale</div><div class="val-desc">Zéro frais cachés</div></div></div>
-          <div class="val-item"><div class="val-dot"></div><div><div class="val-label">Expertise locale</div><div class="val-desc">Connaissance du marché</div></div></div>
-          <div class="val-item"><div class="val-dot"></div><div><div class="val-label">Rôle d'intermédiaire</div><div class="val-desc">Pas de responsabilité directe</div></div></div>
-          <div class="val-item"><div class="val-dot"></div><div><div class="val-label">Réactivité</div><div class="val-desc">Disponibles 6j/7</div></div></div>
+        <span class="section-label">Qui sommes-nous</span>
+        <h2 class="section-title light">F2K IMMO PLUS,<br>votre agence de confiance</h2>
+        <div class="divider"></div>
+        <p class="section-sub light">F2K IMMO PLUS est une agence immobilière fondée sur des valeurs d'intégrité et d'excellence. Nous accompagnons nos clients dans tous leurs projets immobiliers, de la recherche à la signature.</p>
+        <p class="section-sub light" style="margin-top:12px">Notre équipe combine expertise immobilière, gestion locative et services d'entretien pour vous offrir une solution complète.</p>
+        <div class="about-values">
+          <div class="value-item"><div class="value-dot"></div><div><div class="value-label">Transparence totale</div><div class="value-desc">Zéro frais cachés</div></div></div>
+          <div class="value-item"><div class="value-dot"></div><div><div class="value-label">Expertise locale</div><div class="value-desc">Connaissance du marché</div></div></div>
+          <div class="value-item"><div class="value-dot"></div><div><div class="value-label">Service 360°</div><div class="value-desc">De A à Z</div></div></div>
+          <div class="value-item"><div class="value-dot"></div><div><div class="value-label">Réactivité</div><div class="value-desc">Disponibles 6j/7</div></div></div>
         </div>
       </div>
     </div>
   </section>
 
   <!-- PROCESS -->
-  <section id="process" class="section gray">
-    <div class="shead fade-in" style="text-align:center"><span class="slabel">Notre méthode</span><h2 class="stitle">Comment ça marche ?</h2><div class="sdivider" style="margin:14px auto"></div><p class="ssub" style="margin:0 auto;text-align:center">Simple, transparent et sécurisé.</p></div>
-    <div class="proc-steps">
-      <div class="step fade-in"><div class="step-num">1</div><div class="step-title">Consultation</div><p class="step-desc">Parcourez les annonces ou contactez-nous directement.</p></div>
-      <div class="step fade-in"><div class="step-num">2</div><div class="step-title">Visite du bien</div><p class="step-desc">Nous organisons la visite. Vous décidez librement.</p></div>
-      <div class="step fade-in"><div class="step-num">3</div><div class="step-title">Accord &amp; Paiement</div><p class="step-desc">Vous êtes d'accord ? Vous payez. Aucun retour en arrière.</p></div>
-      <div class="step fade-in"><div class="step-num">4</div><div class="step-title">Remise des clés</div><p class="step-desc">Documents signés, clés remises. Transaction finalisée.</p></div>
+  <section class="sec" style="background:var(--g100)">
+    <div class="sec-header" style="text-align:center">
+      <span class="section-label">Notre méthode</span>
+      <h2 class="section-title">Comment ça marche ?</h2>
+      <div class="divider" style="margin:18px auto"></div>
+    </div>
+    <div class="process-steps">
+      <div class="step"><div class="step-num">1</div><div class="step-title">Consultation gratuite</div><p class="step-desc">Échangez avec nos experts pour définir vos besoins et budget.</p></div>
+      <div class="step"><div class="step-num">2</div><div class="step-title">Sélection de biens</div><p class="step-desc">Nous sélectionnons les meilleures offres selon vos critères.</p></div>
+      <div class="step"><div class="step-num">3</div><div class="step-title">Visite & Accord</div><p class="step-desc"><strong>Vous visitez d'abord, puis vous décidez.</strong> Aucun paiement avant la visite.</p></div>
+      <div class="step"><div class="step-num">4</div><div class="step-title">Paiement & Remise</div><p class="step-desc">Si vous êtes d'accord, paiement et remise des clés / acte signé.</p></div>
+    </div>
+    <div style="margin-top:36px;text-align:center">
+      <div style="display:inline-flex;gap:12px;flex-wrap:wrap;justify-content:center">
+        <button class="btn-primary" onclick="openTermsModal('locataire')">📋 Conditions Locataire</button>
+        <button class="btn-primary" onclick="openTermsModal('proprietaire')" style="background:var(--black);color:var(--white)">🏠 Conditions Propriétaire</button>
+        <button class="btn-primary" onclick="openTermsModal('acheteur')" style="background:var(--adark);color:var(--white)">🛒 Conditions Acheteur</button>
+        <button class="btn-primary" onclick="openTermsModal('vendeur')" style="background:var(--g600);color:var(--white)">💰 Conditions Vendeur</button>
+      </div>
     </div>
   </section>
 
   <!-- CONTACT -->
-  <section id="contact" class="section dark">
+  <section class="sec" id="contact-sec" style="background:var(--black)">
     <div class="contact-grid">
       <div>
-        <span class="slabel">Nous joindre</span>
-        <h2 class="stitle light">Parlons de<br>votre projet</h2>
-        <div class="sdivider"></div>
-        <div style="margin-top:26px" class="fade-in">
-          <div class="contact-item"><div class="contact-icon">📍</div><div><div class="clabel">Adresse</div><div class="cval">Commune de Zè, Arr. de Tangbo<br>Village Tangbo Djevié (environs GDIZ), Bénin</div></div></div>
-          <div class="contact-item"><div class="contact-icon">💬</div><div><div class="clabel">WhatsApp</div><div class="cval"><a href="https://wa.me/2290158070708">+229 01 58 07 07 08</a></div></div></div>
-          <div class="contact-item"><div class="contact-icon">✉️</div><div><div class="clabel">Email</div><div class="cval"><a href="mailto:f2kmultiservice@gmail.com">f2kmultiservice@gmail.com</a></div></div></div>
-          <div class="contact-item"><div class="contact-icon">⏰</div><div><div class="clabel">Horaires</div><div class="cval">Lun–Sam : 8h – 18h</div></div></div>
+        <span class="section-label">Nous joindre</span>
+        <h2 class="section-title light">Parlons de<br>votre projet</h2>
+        <div class="divider"></div>
+        <div style="margin-top:28px">
+          <div class="contact-item">
+            <div class="contact-icon">📍</div>
+            <div><div class="contact-label">Adresse</div><div class="contact-val">Commune de Zè, Arr. Tangbo<br>Village Tangbo Djevié (env. GDIZ), Bénin</div></div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon">💬</div>
+            <div><div class="contact-label">WhatsApp</div><div class="contact-val"><a href="https://wa.me/2290158070708">+229 01 58 07 07 08</a></div></div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon">✉️</div>
+            <div><div class="contact-label">Email</div><div class="contact-val"><a href="/cdn-cgi/l/email-protection#dcbaeeb7b1a9b0a8b5afb9aeaab5bfb99cbbb1bdb5b0f2bfb3b1"><span class="__cf_email__" data-cfemail="5731653c3a223b233e243225213e343217303a363e3b7934383a">[email&#160;protected]</span></a></div></div>
+          </div>
+          <div class="contact-item">
+            <div class="contact-icon">⏰</div>
+            <div><div class="contact-label">Horaires</div><div class="contact-val">Lun–Sam : 8h – 18h</div></div>
+          </div>
         </div>
       </div>
-      <div class="fade-in">
-        <form class="form" onsubmit="handleContact(event)">
-          <div class="form-row"><div class="fg"><label>Prénom</label><input type="text" required placeholder="Prénom"></div><div class="fg"><label>Nom</label><input type="text" required placeholder="Nom"></div></div>
-          <div class="fg"><label>Email</label><input type="email" required placeholder="votre@email.com"></div>
-          <div class="fg"><label>Téléphone</label><input type="tel" placeholder="+229..."></div>
-          <div class="fg"><label>Service souhaité</label><select><option>Vente immobilière</option><option>Location</option><option>Gestion locative</option><option>Entretien bureaux/maisons</option><option>Déménagement</option><option>Services notariaux</option><option>Autre</option></select></div>
-          <div class="fg"><label>Message</label><textarea rows="4" placeholder="Décrivez votre projet..."></textarea></div>
+      <div>
+        <form onsubmit="handleContact(event)">
+          <div class="form-row">
+            <div class="form-group"><label>Prénom</label><input type="text" placeholder="Prénom" required></div>
+            <div class="form-group"><label>Nom</label><input type="text" placeholder="Nom" required></div>
+          </div>
+          <div class="form-group"><label>Email</label><input type="email" placeholder="votre@email.com" required></div>
+          <div class="form-group"><label>Téléphone</label><input type="tel" placeholder="+229..."></div>
+          <div class="form-group">
+            <label>Service souhaité</label>
+            <select>
+              <option>Vente immobilière</option><option>Location</option><option>Gestion locative</option>
+              <option>Entretien bureaux/maisons</option><option>Déménagement</option><option>Services notariaux</option><option>Autre</option>
+            </select>
+          </div>
+          <div class="form-group"><label>Message</label><textarea rows="4" placeholder="Décrivez votre projet..."></textarea></div>
           <button type="submit" class="btn-primary" style="width:100%">Envoyer ma demande →</button>
         </form>
       </div>
@@ -359,518 +1116,413 @@ footer{background:#050505;padding:52px 80px 26px;border-top:1px solid rgba(200,1
   <!-- FOOTER -->
   <footer>
     <div class="footer-top">
-      <div><div class="fb-name">F2K <span>IMMO</span> PLUS</div><p class="fb-desc">Votre agence immobilière et de services. Vente, location, gestion locative, entretien et bien plus.</p><p style="margin-top:9px;font-size:.76rem;color:var(--accent)">Une marque de <strong>F2K MULTISERVICE</strong></p></div>
-      <div><div class="fc-title">Services</div><ul class="footer-links"><li><a>Vente</a></li><li><a>Location</a></li><li><a>Gestion locative</a></li><li><a>Entretien</a></li><li><a>Déménagement</a></li></ul></div>
-      <div><div class="fc-title">Légal</div><ul class="footer-links"><li><a onclick="openTermsModal('locataire')">Conditions locataire</a></li><li><a onclick="openTermsModal('proprietaire')">Conditions propriétaire</a></li><li><a onclick="openTermsModal('acheteur')">Conditions acheteur</a></li><li><a onclick="openTermsModal('vendeur')">Conditions vendeur</a></li></ul></div>
-      <div><div class="fc-title">Contact</div><ul class="footer-links"><li><a>Tangbo Djevié, Commune de Zè</a></li><li><a>Arr. Tangbo (environs GDIZ)</a></li><li><a href="https://wa.me/2290158070708">+229 01 58 07 07 08</a></li><li><a href="mailto:f2kmultiservice@gmail.com">f2kmultiservice@gmail.com</a></li></ul></div>
+      <div>
+        <div class="footer-brand-name">F2K <span>IMMO</span> PLUS</div>
+        <p class="footer-brand-desc">Votre agence immobilière et de services. Vente, location, gestion locative, entretien et bien plus.</p>
+        <p style="margin-top:10px;font-size:.78rem;color:var(--accent)">Une marque de <strong>F2K MULTISERVICE</strong></p>
+      </div>
+      <div>
+        <div class="footer-col-title">Services</div>
+        <ul class="footer-links">
+          <li><button onclick="openSrvModal('vente')">Vente</button></li>
+          <li><button onclick="openSrvModal('location')">Location</button></li>
+          <li><button onclick="openSrvModal('gestion')">Gestion locative</button></li>
+          <li><button onclick="openSrvModal('entretien')">Entretien</button></li>
+          <li><button onclick="openSrvModal('demenagement')">Déménagement</button></li>
+        </ul>
+      </div>
+      <div>
+        <div class="footer-col-title">Conditions</div>
+        <ul class="footer-links">
+          <li><button onclick="openTermsModal('locataire')">Locataire</button></li>
+          <li><button onclick="openTermsModal('proprietaire')">Propriétaire</button></li>
+          <li><button onclick="openTermsModal('acheteur')">Acheteur</button></li>
+          <li><button onclick="openTermsModal('vendeur')">Vendeur</button></li>
+        </ul>
+      </div>
+      <div>
+        <div class="footer-col-title">Contact</div>
+        <ul class="footer-links">
+          <li><a href="#">Tangbo Djevié, Commune de Zè</a></li>
+          <li><a href="https://wa.me/2290158070708">+229 01 58 07 07 08</a></li>
+          <li><a href="/cdn-cgi/l/email-protection#92f4a0f9ffe7fee6fbe1f7e0e4fbf1f7d2f5fff3fbfebcf1fdff"><span class="__cf_email__" data-cfemail="0d6b3f6660786179647e687f7b646e684d6a606c6461236e6260">[email&#160;protected]</span></a></li>
+        </ul>
+      </div>
     </div>
     <div class="footer-bottom">
       <span>© 2025 <strong style="color:var(--accent)">F2K MULTISERVICE</strong>. Tous droits réservés.</span>
       <span>Promoteurs : <strong style="color:var(--white)">Kouessi Franck Kevin ADRE</strong> &amp; <strong style="color:var(--white)">DOVI Abraham</strong></span>
     </div>
   </footer>
-</div>
+</div><!-- end home-page -->
 
-<!-- ═══ PROFILE ═══ -->
-<div id="pg-profile" class="page">
-  <h1 style="font-family:'Playfair Display',serif;font-size:1.7rem;font-weight:700;margin-bottom:6px">Mon Espace</h1>
-  <p style="color:var(--g400);font-size:.88rem">Gérez vos annonces, favoris et informations personnelles.</p>
-  <div class="profile-grid" id="profile-content"></div>
-</div>
-
-<!-- ═══ ADMIN ═══ -->
-<div id="pg-admin" class="page">
-  <div class="admin-wrap">
-    <aside class="admin-sidebar">
-      <div style="padding:0 22px 22px;border-bottom:1px solid rgba(200,169,110,.1);margin-bottom:10px">
-        <div style="font-family:'Playfair Display',serif;font-size:1.05rem;font-weight:700;color:var(--white)">F2K <span style="color:var(--accent)">ADMIN</span></div>
-        <div style="font-size:.72rem;color:var(--g600);margin-top:2px">f2kmultiservice@gmail.com</div>
+<!-- ══════════════════════════════════════════════════════════
+     LISTINGS PAGE
+══════════════════════════════════════════════════════════ -->
+<div id="listings-page" class="page">
+  <div class="listings-page-header">
+    <span class="section-label">Toutes les annonces</span>
+    <h1 style="font-family:'Playfair Display',serif;font-size:2.4rem;color:var(--white);font-weight:700">Biens Disponibles</h1>
+    <div class="listings-page-search">
+      <div class="sf"><label>Mot-clé</label><input type="text" id="lp-search-q" placeholder="Villa, bureau..."></div>
+      <div class="sf"><label>Localisation</label><input type="text" id="lp-search-loc" placeholder="Quartier, ville..."></div>
+      <div class="sf"><label>Transaction</label>
+        <select id="lp-search-trans" onchange="renderListingsPage(this.value)">
+          <option value="tous">Tous</option><option value="vente">Vente</option><option value="location">Location</option>
+        </select>
       </div>
+      <button class="btn-primary" onclick="renderListingsPage(document.getElementById('lp-search-trans').value)">🔍 Filtrer</button>
+    </div>
+  </div>
+  <div style="padding:40px 80px">
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab(this,'tous')">Tous</button>
+      <button class="tab" onclick="switchTab(this,'vente')">À Vendre</button>
+      <button class="tab" onclick="switchTab(this,'location')">À Louer</button>
+    </div>
+    <div class="listings-grid" id="listings-page-grid">
+      <div style="grid-column:1/-1;text-align:center;padding:60px;color:var(--g400)">Chargement...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     ADMIN PAGE
+══════════════════════════════════════════════════════════ -->
+<div id="adm-page" class="page">
+  <div class="adm-layout">
+    <!-- Sidebar -->
+    <aside class="adm-sidebar">
+      <div class="adm-sidebar-title">ADMINISTRATION</div>
       <ul class="adm-menu">
-        <li><a class="active-adm" onclick="showAdmTab('dashboard',this)"><span>📊</span> Tableau de bord</a></li>
-        <li><a onclick="showAdmTab('listings',this)"><span>🏠</span> Annonces</a></li>
-        <li><a onclick="showAdmTab('add',this)"><span>➕</span> Ajouter un bien</a></li>
-        <li><a onclick="showAdmTab('users',this)"><span>👥</span> Utilisateurs</a></li>
-        <li><a onclick="showAdmTab('messages',this)"><span>📩</span> Messages</a></li>
+        <li><a data-tab="dashboard" class="active-adm" onclick="showAdmTab('dashboard')">📊 Tableau de bord</a></li>
+        <li><a data-tab="add" onclick="showAdmTab('add')">➕ Ajouter un bien</a></li>
+        <li><a data-tab="listings" onclick="showAdmTab('listings')">🏠 Gérer les biens</a></li>
+        <li><a data-tab="users" onclick="showAdmTab('users')">👥 Utilisateurs</a></li>
+        <li><a data-tab="messages" onclick="showAdmTab('messages')">✉️ Messages</a></li>
       </ul>
     </aside>
-    <div class="admin-content" id="admin-content"></div>
+
+    <!-- Main -->
+    <main class="adm-main">
+
+      <!-- Dashboard -->
+      <div id="adm-dashboard" class="adm-tab-content active">
+        <h2 style="font-family:'Playfair Display',serif;font-size:1.6rem;margin-bottom:28px">Tableau de bord</h2>
+        <div class="adm-stats">
+          <div class="adm-stat"><div class="adm-stat-num" id="adm-stat-listings">—</div><div class="adm-stat-label">Annonces totales</div></div>
+          <div class="adm-stat"><div class="adm-stat-num" id="adm-stat-vente">—</div><div class="adm-stat-label">En vente</div></div>
+          <div class="adm-stat"><div class="adm-stat-num" id="adm-stat-loc">—</div><div class="adm-stat-label">En location</div></div>
+          <div class="adm-stat"><div class="adm-stat-num" id="adm-stat-users">—</div><div class="adm-stat-label">Utilisateurs</div></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:8px">
+          <div class="adm-card" style="cursor:pointer" onclick="showAdmTab('add')">
+            <div style="font-size:2rem;margin-bottom:12px">➕</div>
+            <h3 style="margin:0 0 6px">Ajouter un bien</h3>
+            <p style="color:var(--g400);font-size:.86rem">Publier une nouvelle annonce immobilière</p>
+          </div>
+          <div class="adm-card" style="cursor:pointer" onclick="showAdmTab('messages')">
+            <div style="font-size:2rem;margin-bottom:12px">✉️</div>
+            <h3 style="margin:0 0 6px">Messages reçus</h3>
+            <p style="color:var(--g400);font-size:.86rem"><span id="adm-stat-msgs">—</span> messages de clients</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add Listing -->
+      <div id="adm-add" class="adm-tab-content">
+        <h2 style="font-family:'Playfair Display',serif;font-size:1.6rem;margin-bottom:28px">Ajouter un bien</h2>
+        <div class="adm-card">
+          <form onsubmit="admAddListing(event)">
+            <div class="form-row-adm">
+              <div class="form-group-adm">
+                <label>Type de bien *</label>
+                <select id="ad-type" required>
+                  <option>Villa</option><option>Appartement</option><option>Maison</option>
+                  <option>Bureau</option><option>Terrain</option><option>Local commercial</option>
+                </select>
+              </div>
+              <div class="form-group-adm">
+                <label>Transaction *</label>
+                <select id="ad-trans" required>
+                  <option value="vente">Vente</option>
+                  <option value="location">Location</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group-adm">
+              <label>Titre de l'annonce *</label>
+              <input type="text" id="ad-title" placeholder="Ex: Villa moderne 4 chambres à Cotonou" required>
+            </div>
+            <div class="form-group-adm">
+              <label>Localisation *</label>
+              <input type="text" id="ad-loc" placeholder="Quartier, ville, arrondissement..." required>
+            </div>
+            <div class="form-row-adm">
+              <div class="form-group-adm">
+                <label>Prix *</label>
+                <input type="number" id="ad-price" placeholder="Ex: 75000000" required>
+              </div>
+              <div class="form-group-adm">
+                <label>Unité</label>
+                <select id="ad-unit">
+                  <option value="FCFA">FCFA (vente)</option>
+                  <option value="FCFA/mois">FCFA/mois (location)</option>
+                  <option value="FCFA/an">FCFA/an</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row-adm">
+              <div class="form-group-adm">
+                <label>Chambres</label>
+                <input type="number" id="ad-rooms" placeholder="0" min="0">
+              </div>
+              <div class="form-group-adm">
+                <label>Salles de bain</label>
+                <input type="number" id="ad-bath" placeholder="0" min="0">
+              </div>
+            </div>
+            <div class="form-group-adm">
+              <label>Superficie (m²)</label>
+              <input type="number" id="ad-area" placeholder="Ex: 200">
+            </div>
+            <div class="form-group-adm">
+              <label>Description</label>
+              <textarea id="ad-desc" rows="4" placeholder="Description détaillée du bien..."></textarea>
+            </div>
+            <div class="form-group-adm">
+              <label>Photo du bien</label>
+              <input type="file" id="ad-img" accept="image/*" onchange="previewImg(this)">
+              <div id="img-preview"></div>
+            </div>
+            <button type="submit" id="btn-adm-add" class="btn-primary" style="margin-top:8px">➕ Publier l'annonce</button>
+          </form>
+        </div>
+      </div>
+
+      <!-- Manage Listings -->
+      <div id="adm-listings" class="adm-tab-content">
+        <h2 style="font-family:'Playfair Display',serif;font-size:1.6rem;margin-bottom:28px">Gérer les biens</h2>
+        <div class="adm-card">
+          <table class="adm-table">
+            <thead><tr><th>Titre</th><th>Type</th><th>Trans.</th><th>Lieu</th><th>Prix</th><th>Action</th></tr></thead>
+            <tbody id="adm-listings-tbody">
+              <tr><td colspan="6" style="text-align:center;color:var(--g400)">Chargement...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Users -->
+      <div id="adm-users" class="adm-tab-content">
+        <h2 style="font-family:'Playfair Display',serif;font-size:1.6rem;margin-bottom:28px">Utilisateurs inscrits</h2>
+        <div class="adm-card">
+          <table class="adm-table">
+            <thead><tr><th>Nom</th><th>Email</th><th>Rôle</th><th>Date</th><th>Action</th></tr></thead>
+            <tbody id="adm-users-tbody">
+              <tr><td colspan="5" style="text-align:center;color:var(--g400)">Chargement...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div id="adm-messages" class="adm-tab-content">
+        <h2 style="font-family:'Playfair Display',serif;font-size:1.6rem;margin-bottom:28px">Messages reçus</h2>
+        <div class="adm-card">
+          <table class="adm-table">
+            <thead><tr><th>Nom</th><th>Email</th><th>Service</th><th>Message</th><th>Date</th></tr></thead>
+            <tbody id="adm-msgs-tbody">
+              <tr><td colspan="5" style="text-align:center;color:var(--g400)">Chargement...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div><!-- end adm-page -->
+
+<!-- ══════════════════════════════════════════════════════════
+     MODALS
+══════════════════════════════════════════════════════════ -->
+
+<!-- Login -->
+<div class="modal-overlay modal-dark" id="m-login">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 class="modal-title" style="color:var(--white)">Connexion</h3>
+      <button class="modal-close" style="color:var(--g400)" onclick="closeModal('m-login')">✕</button>
+    </div>
+    <form onsubmit="doLogin(event)">
+      <div class="form-group"><label>Email</label><input type="email" id="login-email" placeholder="votre@email.com" required></div>
+      <div class="form-group"><label>Mot de passe</label><input type="password" id="login-pass" placeholder="••••••••" required></div>
+      <button type="submit" id="btn-login" class="btn-primary" style="width:100%;margin-top:8px">Se connecter</button>
+      <p style="text-align:center;margin-top:16px;font-size:.85rem;color:var(--g400)">Pas encore de compte ? <button type="button" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.85rem" onclick="closeModal('m-login');openModal('m-register')">S'inscrire</button></p>
+    </form>
   </div>
 </div>
 
-<!-- ═══ MODALS ═══ -->
-
-<!-- AUTH -->
-<div class="modal-overlay" id="m-auth">
+<!-- Register -->
+<div class="modal-overlay" id="m-register">
   <div class="modal">
-    <div class="mhead"><h3 class="mtitle" id="auth-title">Connexion</h3><button class="mclose" onclick="closeModal('m-auth')">✕</button></div>
-    <div class="auth-tabs">
-      <button class="auth-tab active" id="tab-login" onclick="authTab('login')">Se connecter</button>
-      <button class="auth-tab" id="tab-reg" onclick="authTab('register')">S'inscrire</button>
+    <div class="modal-header">
+      <h3 class="modal-title">Créer un compte</h3>
+      <button class="modal-close" onclick="closeModal('m-register')">✕</button>
     </div>
-    <div id="f-login">
-      <form class="form" onsubmit="doLogin(event)">
-        <div class="fg light"><label>Email</label><input type="email" id="l-email" placeholder="votre@email.com" required></div>
-        <div class="fg light"><label>Mot de passe</label><input type="password" id="l-pass" placeholder="••••••••" required></div>
-        <button type="submit" class="btn-primary" style="width:100%;margin-top:4px">Se connecter →</button>
-      </form>
-      <p style="text-align:center;margin-top:14px;font-size:.82rem;color:var(--g400)">Pas encore inscrit ? <span style="color:var(--accent);cursor:pointer;font-weight:600" onclick="authTab('register')">Créer un compte</span></p>
-      <p style="text-align:center;margin-top:8px;font-size:.8rem;color:var(--g400)">Vous pouvez aussi <a href="https://wa.me/2290158070708" target="_blank" style="color:var(--accent)">nous contacter sur WhatsApp</a> sans compte.</p>
-    </div>
-    <div id="f-reg" style="display:none">
-      <form class="form" onsubmit="doRegister(event)">
-        <div class="form-row">
-          <div class="fg light"><label>Prénom</label><input type="text" id="r-prenom" placeholder="Prénom" required></div>
-          <div class="fg light"><label>Nom</label><input type="text" id="r-nom" placeholder="Nom" required></div>
-        </div>
-        <div class="fg light"><label>Email</label><input type="email" id="r-email" placeholder="votre@email.com" required></div>
-        <div class="fg light"><label>Téléphone</label><input type="tel" id="r-tel" placeholder="+229..."></div>
-        <div class="fg light"><label>Mot de passe</label><input type="password" id="r-pass" placeholder="••••••••" required></div>
-        <div class="fg light"><label>Vous êtes</label>
-          <select id="r-role"><option value="acheteur">Acheteur / Locataire</option><option value="proprietaire">Propriétaire / Vendeur</option></select>
-        </div>
-        <div style="background:var(--g100);border-radius:8px;padding:13px;border:1px solid var(--g200)">
-          <p style="font-size:.8rem;color:var(--g600);margin-bottom:9px">En vous inscrivant vous acceptez :</p>
-          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-size:.8rem;color:var(--g600);margin-bottom:7px"><input type="checkbox" id="chk1" style="margin-top:2px"> Les <span style="color:var(--accent);cursor:pointer;margin:0 4px;font-weight:600" onclick="openTermsModal('acheteur')">conditions d'utilisation</span> de la plateforme</label>
-          <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-size:.8rem;color:var(--g600)"><input type="checkbox" id="chk2" style="margin-top:2px"> F2K IMMO PLUS est un <strong style="color:var(--black);margin:0 4px">simple intermédiaire</strong> — aucun remboursement après transaction</label>
-        </div>
-        <button type="submit" class="btn-primary" style="width:100%;margin-top:4px">Créer mon compte →</button>
-      </form>
-    </div>
+    <p style="font-size:.85rem;color:var(--g600);margin-bottom:20px">Inscription instantanée — aucune validation requise.</p>
+    <form onsubmit="doRegister(event)">
+      <div class="form-group"><label>Nom complet *</label><input type="text" id="reg-name" placeholder="Votre nom" required style="background:var(--g100);border-color:var(--g200);color:var(--black)"></div>
+      <div class="form-group"><label>Email *</label><input type="email" id="reg-email" placeholder="votre@email.com" required style="background:var(--g100);border-color:var(--g200);color:var(--black)"></div>
+      <div class="form-group"><label>Mot de passe *</label><input type="password" id="reg-pass" placeholder="Minimum 6 caractères" minlength="6" required style="background:var(--g100);border-color:var(--g200);color:var(--black)"></div>
+      <div class="form-group">
+        <label>Je suis un(e) *</label>
+        <select id="reg-role" style="background:var(--g100);border-color:var(--g200);color:var(--black)">
+          <option value="acheteur">🛒 Acheteur — Je cherche à acheter</option>
+          <option value="locataire">🔑 Locataire — Je cherche à louer</option>
+          <option value="vendeur">💰 Vendeur — J'ai un bien à vendre</option>
+          <option value="proprietaire">🏠 Propriétaire — J'ai un bien à louer</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:flex-start;gap:10px;margin:16px 0;padding:14px;background:var(--g100);border-radius:8px">
+        <input type="checkbox" id="reg-terms" style="margin-top:4px;width:auto;flex-shrink:0">
+        <label for="reg-terms" style="font-size:.82rem;color:var(--g600);cursor:pointer">
+          J'ai lu et j'accepte les <button type="button" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.82rem;padding:0" onclick="openTermsModal('locataire')">conditions d'utilisation</button> de F2K IMMO PLUS. Je comprends que l'agence agit en tant qu'<strong>intermédiaire</strong> et qu'<strong>aucun remboursement</strong> n'est possible après signature.
+        </label>
+      </div>
+      <button type="submit" id="btn-register" class="btn-primary" style="width:100%">Créer mon compte →</button>
+      <p style="text-align:center;margin-top:14px;font-size:.82rem;color:var(--g400)">Déjà un compte ? <button type="button" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.82rem" onclick="closeModal('m-register');openModal('m-login')">Se connecter</button></p>
+    </form>
   </div>
 </div>
 
-<!-- SERVICE MODAL -->
-<div class="modal-overlay" id="m-service">
+<!-- Listing Detail -->
+<div class="modal-overlay" id="m-detail">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h3 class="modal-title">Détail du bien</h3>
+      <button class="modal-close" onclick="closeModal('m-detail')">✕</button>
+    </div>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<!-- Service Modal -->
+<div class="modal-overlay modal-dark" id="m-service">
   <div class="modal">
-    <div class="mhead"><h3 class="mtitle" id="srv-title"></h3><button class="mclose" onclick="closeModal('m-service')">✕</button></div>
-    <p id="srv-desc" style="color:var(--g600);margin-bottom:22px;font-size:.88rem;line-height:1.65"></p>
-    <form class="form" onsubmit="handleSrvContact(event)">
-      <div class="form-row"><div class="fg light"><label>Prénom</label><input type="text" placeholder="Prénom" required></div><div class="fg light"><label>Téléphone</label><input type="tel" placeholder="+229..."></div></div>
-      <div class="fg light"><label>Email</label><input type="email" placeholder="votre@email.com" required></div>
-      <div class="fg light"><label>Message</label><textarea rows="3" placeholder="Précisez votre demande..."></textarea></div>
+    <div class="modal-header">
+      <h3 class="modal-title" id="srv-title" style="color:var(--white)">Service</h3>
+      <button class="modal-close" onclick="closeModal('m-service')">✕</button>
+    </div>
+    <p id="srv-desc" style="color:var(--g400);margin-bottom:24px;font-size:.9rem;line-height:1.7"></p>
+    <form onsubmit="handleSrvContact(event)">
+      <div class="form-group"><label>Prénom & Nom</label><input type="text" placeholder="Votre nom" required></div>
+      <div class="form-group"><label>Email</label><input type="email" placeholder="votre@email.com" required></div>
+      <div class="form-group"><label>Message</label><textarea rows="3" placeholder="Précisez votre demande..."></textarea></div>
       <button type="submit" class="btn-primary" style="width:100%">Envoyer →</button>
     </form>
   </div>
 </div>
 
-<!-- LISTING DETAIL -->
-<div class="modal-overlay" id="m-listing">
-  <div class="modal" style="max-width:620px">
-    <div class="mhead"><h3 class="mtitle" id="ld-title"></h3><button class="mclose" onclick="closeModal('m-listing')">✕</button></div>
-    <div id="ld-body"></div>
-  </div>
-</div>
-
-<!-- TERMS -->
+<!-- Terms Modal -->
 <div class="modal-overlay" id="m-terms">
-  <div class="modal" style="max-width:700px">
-    <div class="mhead"><h3 class="mtitle">📜 Conditions d'Utilisation — F2K IMMO PLUS</h3><button class="mclose" onclick="closeModal('m-terms')">✕</button></div>
-    <div class="terms-tabs">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h3 class="modal-title">Conditions d'utilisation</h3>
+      <button class="modal-close" onclick="closeModal('m-terms')">✕</button>
+    </div>
+    <div style="background:#fff8ee;border-left:4px solid var(--accent);padding:14px 16px;border-radius:4px;margin-bottom:20px;font-size:.85rem;color:var(--g600)">
+      ⚠️ <strong>Principe fondamental :</strong> F2K IMMO PLUS est un <strong>intermédiaire</strong>. Nous vous montrons le bien. Si vous êtes d'accord, vous payez. <strong>Aucun remboursement n'est accordé</strong> après signature. Nous ne sommes en aucun cas responsables des litiges entre parties.
+    </div>
+    <div class="tterm-tabs">
       <button class="tterm-tab active" onclick="showTermsTab('locataire',this)">🔑 Locataire</button>
       <button class="tterm-tab" onclick="showTermsTab('proprietaire',this)">🏠 Propriétaire</button>
-      <button class="tterm-tab" onclick="showTermsTab('acheteur',this)">💰 Acheteur</button>
-      <button class="tterm-tab" onclick="showTermsTab('vendeur',this)">📋 Vendeur</button>
+      <button class="tterm-tab" onclick="showTermsTab('acheteur',this)">🛒 Acheteur</button>
+      <button class="tterm-tab" onclick="showTermsTab('vendeur',this)">💰 Vendeur</button>
     </div>
-    <div id="terms-body"></div>
+    <div id="terms-body" style="max-height:60vh;overflow-y:auto;padding-right:8px"></div>
   </div>
 </div>
 
-<!-- ADD LISTING -->
-<div class="modal-overlay" id="m-add">
-  <div class="modal" style="max-width:590px">
-    <div class="mhead"><h3 class="mtitle">➕ Publier un bien ou service</h3><button class="mclose" onclick="closeModal('m-add')">✕</button></div>
-    <form class="form" onsubmit="doAddListing(event)">
-      <div class="fg light"><label>Titre de l'annonce</label><input type="text" id="al-title" placeholder="Ex: Villa 4 chambres avec jardin" required></div>
-      <div class="form-row">
-        <div class="fg light"><label>Type de bien</label><select id="al-type"><option>Villa</option><option>Appartement</option><option>Bureau</option><option>Terrain</option><option>Local commercial</option><option>Service</option></select></div>
-        <div class="fg light"><label>Transaction</label><select id="al-trans"><option value="vente">Vente</option><option value="location">Location</option><option value="service">Service</option></select></div>
-      </div>
-      <div class="fg light"><label>Localisation</label><input type="text" id="al-loc" placeholder="Quartier, ville..." required></div>
-      <div class="form-row">
-        <div class="fg light"><label>Prix (FCFA)</label><input type="text" id="al-price" placeholder="Ex: 75 000 000" required></div>
-        <div class="fg light"><label>Unité</label><select id="al-unit"><option value="FCFA">FCFA (vente)</option><option value="FCFA/mois">FCFA/mois</option><option value="FCFA/an">FCFA/an</option><option value="FCFA/prestation">FCFA/prestation</option></select></div>
-      </div>
-      <div class="form-row">
-        <div class="fg light"><label>Chambres</label><input type="number" id="al-rooms" placeholder="0" min="0"></div>
-        <div class="fg light"><label>Surface (m²)</label><input type="number" id="al-area" placeholder="0" min="0"></div>
-      </div>
-      <div class="fg light"><label>Icône du bien</label>
-        <div class="img-select-grid" id="emoji-grid">
-          <div class="img-opt selected" data-e="🏡" onclick="pickEmoji(this)">🏡<span>Villa</span></div>
-          <div class="img-opt" data-e="🏢" onclick="pickEmoji(this)">🏢<span>Appart.</span></div>
-          <div class="img-opt" data-e="🏬" onclick="pickEmoji(this)">🏬<span>Bureau</span></div>
-          <div class="img-opt" data-e="🌿" onclick="pickEmoji(this)">🌿<span>Terrain</span></div>
-          <div class="img-opt" data-e="🛋️" onclick="pickEmoji(this)">🛋️<span>Studio</span></div>
-          <div class="img-opt" data-e="🏪" onclick="pickEmoji(this)">🏪<span>Local</span></div>
-          <div class="img-opt" data-e="🧹" onclick="pickEmoji(this)">🧹<span>Entretien</span></div>
-          <div class="img-opt" data-e="🚚" onclick="pickEmoji(this)">🚚<span>Déménag.</span></div>
-          <div class="img-opt" data-e="⚖️" onclick="pickEmoji(this)">⚖️<span>Notaire</span></div>
-          <div class="img-opt" data-e="🏠" onclick="pickEmoji(this)">🏠<span>Maison</span></div>
+<!-- Publish Listing (for logged-in users) -->
+<div class="modal-overlay" id="m-publish">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <h3 class="modal-title">📤 Publier un bien</h3>
+      <button class="modal-close" onclick="closeModal('m-publish')">✕</button>
+    </div>
+    <div style="background:#f0fdf4;border-left:4px solid var(--green);padding:12px 16px;border-radius:4px;margin-bottom:20px;font-size:.84rem;color:#166534">
+      ✅ Votre annonce sera visible par tous les visiteurs. En publiant, vous acceptez les <button type="button" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:.84rem;padding:0;font-weight:600" onclick="openTermsModal('vendeur')">conditions d'utilisation</button>.
+    </div>
+    <form onsubmit="userPublishListing(event)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="form-group-adm">
+          <label>Type de bien *</label>
+          <select id="up-type" required>
+            <option>Villa</option><option>Appartement</option><option>Maison</option>
+            <option>Bureau</option><option>Terrain</option><option>Local commercial</option>
+          </select>
+        </div>
+        <div class="form-group-adm">
+          <label>Transaction *</label>
+          <select id="up-trans" required>
+            <option value="vente">Vente</option>
+            <option value="location">Location</option>
+          </select>
         </div>
       </div>
-      <div class="fg light"><label>Description</label><textarea id="al-desc" rows="3" placeholder="Décrivez votre bien en détail..."></textarea></div>
-      <div style="background:rgba(200,169,110,.08);border:1px solid rgba(200,169,110,.3);border-radius:8px;padding:11px 13px">
-        <p style="font-size:.78rem;color:var(--g600);line-height:1.6">⚠️ En publiant, vous certifiez être le propriétaire légitime du bien et acceptez les <span style="color:var(--accent);cursor:pointer;font-weight:600" onclick="openTermsModal('vendeur')">conditions vendeur/propriétaire</span>. F2K IMMO PLUS est un intermédiaire et ne pourra être tenu responsable.</p>
+      <div class="form-group-adm">
+        <label>Titre de l'annonce *</label>
+        <input type="text" id="up-title" placeholder="Ex: Belle villa 4 chambres à Cotonou" required>
       </div>
-      <button type="submit" class="btn-primary" style="width:100%">Publier l'annonce →</button>
+      <div class="form-group-adm">
+        <label>Localisation *</label>
+        <input type="text" id="up-loc" placeholder="Quartier, ville, arrondissement..." required>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="form-group-adm">
+          <label>Prix *</label>
+          <input type="number" id="up-price" placeholder="Montant" required>
+        </div>
+        <div class="form-group-adm">
+          <label>Unité</label>
+          <select id="up-unit">
+            <option value="FCFA">FCFA (vente)</option>
+            <option value="FCFA/mois">FCFA/mois (location)</option>
+            <option value="FCFA/an">FCFA/an</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+        <div class="form-group-adm">
+          <label>Chambres</label>
+          <input type="number" id="up-rooms" placeholder="0" min="0">
+        </div>
+        <div class="form-group-adm">
+          <label>SDB</label>
+          <input type="number" id="up-bath" placeholder="0" min="0">
+        </div>
+        <div class="form-group-adm">
+          <label>Superficie (m²)</label>
+          <input type="number" id="up-area" placeholder="0">
+        </div>
+      </div>
+      <div class="form-group-adm">
+        <label>Description</label>
+        <textarea id="up-desc" rows="3" placeholder="Décrivez votre bien (état, équipements, avantages...)"></textarea>
+      </div>
+      <div class="form-group-adm">
+        <label>Photo du bien</label>
+        <input type="file" id="up-img" accept="image/*" onchange="previewUpImg()">
+        <div id="up-img-preview"></div>
+      </div>
+      <button type="submit" id="btn-user-publish" class="btn-primary" style="width:100%;margin-top:8px;background:var(--green);color:#fff">📤 Publier mon annonce</button>
     </form>
   </div>
 </div>
 
+<!-- ═══════════════════ TOAST + WHATSAPP ═══════════════════ -->
 <div class="toast" id="toast"></div>
-<a href="https://wa.me/2290158070708" target="_blank" class="wa-btn" title="WhatsApp">💬</a>
+<a href="https://wa.me/2290158070708" target="_blank" class="wa-float" title="WhatsApp F2K IMMO PLUS">💬</a>
 
-<script>
-// ══════════════════════════ STATE ══════════════════════════
-const ADMIN_EMAIL = 'f2kmultiservice@gmail.com';
-const ADMIN_PASS  = 'F2Kadmin2025!';
-
-let S = {
-  user: null,
-  admTab: 'dashboard',
-  emoji: '🏡',
-  admEmoji: '🏡',
-  favs: [],
-  messages: [],
-  listings: [
-    {id:1,type:'Villa',title:'Villa moderne 4 chambres',loc:'Cotonou, Haie Vive',price:'75 000 000',unit:'FCFA',rooms:4,bath:3,area:280,transaction:'vente',emoji:'🏡',ic:'villa',desc:'Superbe villa avec piscine, jardin paysagé, garage 2 voitures. Sécurisée, eau et électricité permanentes.',owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:'2025-01-10'},
-    {id:2,type:'Appartement',title:'Appartement standing 3 pièces',loc:'Cotonou, Cadjehoun',price:'350 000',unit:'FCFA/mois',rooms:3,bath:2,area:110,transaction:'location',emoji:'🏢',ic:'appart',desc:'Appartement meublé haut de gamme. Cuisine équipée, climatisé, gardiennage 24h/24.',owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:'2025-01-12'},
-    {id:3,type:'Bureau',title:'Bureaux équipés 120m²',loc:'Cotonou, Gbèto',price:'500 000',unit:'FCFA/mois',rooms:6,bath:2,area:120,transaction:'location',emoji:'🏬',ic:'bureau',desc:'Espaces de bureaux modernes, open-space, salle de réunion, parkings. Connexion internet incluse.',owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:'2025-01-14'},
-    {id:4,type:'Villa',title:'Villa duplex avec piscine',loc:'Cotonou, Fidjrossè',price:'120 000 000',unit:'FCFA',rooms:5,bath:4,area:400,transaction:'vente',emoji:'🏠',ic:'villa',desc:'Magnifique duplex avec piscine à débordement, vue dégagée, domotique intégrée.',owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:'2025-01-15'},
-    {id:5,type:'Terrain',title:'Terrain titré 500m²',loc:'Porto-Novo, Centre',price:'18 000 000',unit:'FCFA',rooms:0,bath:0,area:500,transaction:'vente',emoji:'🌿',ic:'terrain',desc:'Terrain entièrement titré, bornage fait, accès route bitumée. Idéal pour construction résidentielle.',owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:'2025-01-16'},
-    {id:6,type:'Service',title:'Nettoyage bureaux (hebdomadaire)',loc:'Cotonou & environs',price:'80 000',unit:'FCFA/mois',rooms:0,bath:0,area:0,transaction:'service',emoji:'🧹',ic:'service',desc:'Service de nettoyage professionnel hebdomadaire. Équipes formées et discrètes, matériel fourni.',owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:'2025-01-18'},
-  ],
-  users: [
-    {id:1,prenom:'Kouessi',nom:'ADRE',email:ADMIN_EMAIL,role:'admin',tel:'+229 01 58 07 07 08',pass:'',date:'2024-01-01'},
-  ]
-};
-
-// ══════════════════════════ INIT ══════════════════════════
-window.addEventListener('load',()=>{
-  setTimeout(()=>{
-    document.getElementById('loader').classList.add('hide');
-    document.querySelectorAll('.fade-in').forEach(el=>{
-      new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting)e.target.classList.add('visible')})},{threshold:.1}).observe(el);
-    });
-    renderListings('tous');
-    updateStats();
-    showTermsTab('locataire',null);
-  },1500);
-});
-
-// ══════════════════════════ PAGES ══════════════════════════
-function showPage(p){
-  document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
-  document.getElementById('pg-'+p).classList.add('active');
-  window.scrollTo(0,0);
-  if(p==='admin') renderAdmTab(S.admTab);
-  if(p==='profile') renderProfile();
-}
-function scrollSec(id){setTimeout(()=>{const el=document.querySelector(id);if(el)el.scrollIntoView({behavior:'smooth',block:'start'})},120)}
-
-// ══════════════════════════ STATS ══════════════════════════
-function updateStats(){
-  animN('stat-biens',S.listings.length);
-  animN('stat-users',S.users.filter(u=>u.role!=='admin').length);
-}
-function animN(id,t){let c=0,el=document.getElementById(id);if(!el)return;const s=Math.ceil(t/30);const iv=setInterval(()=>{c=Math.min(c+s,t);el.textContent=c;if(c>=t)clearInterval(iv)},40)}
-
-// ══════════════════════════ LISTINGS ══════════════════════════
-function icClass(type){return{Villa:'villa',Appartement:'appart',Bureau:'bureau',Terrain:'terrain',Service:'service'}[type]||'appart'}
-
-function renderListings(filter,data){
-  const grid=document.getElementById('listings-grid');
-  if(!grid)return;
-  let list=data||S.listings;
-  if(filter&&filter!=='tous')list=list.filter(l=>l.transaction===filter);
-  if(!list.length){grid.innerHTML='<p style="color:var(--g400);grid-column:1/-1;text-align:center;padding:40px">Aucun bien trouvé.</p>';return}
-  grid.innerHTML=list.map(l=>`
-    <div class="lcard" onclick="openListingDetail(${l.id})">
-      <div class="lcard-img ${l.ic}">
-        ${l.emoji}
-        <span class="lcard-badge ${l.transaction}">${l.transaction==='vente'?'À Vendre':l.transaction==='location'?'À Louer':'Service'}</span>
-        <button class="lcard-fav" onclick="event.stopPropagation();toggleFav(${l.id},this)">${S.favs.includes(l.id)?'❤️':'🤍'}</button>
-      </div>
-      <div class="lcard-body">
-        <div class="lcard-type">${l.type}</div>
-        <div class="lcard-title">${l.title}</div>
-        <div class="lcard-loc">📍 ${l.loc}</div>
-        <div class="lcard-feats">${l.rooms>0?`<span>🛏 ${l.rooms} ch.</span>`:''}${l.bath>0?`<span>🚿 ${l.bath}</span>`:''}${l.area>0?`<span>📐 ${l.area} m²</span>`:''}</div>
-        <div class="lcard-footer">
-          <div class="lcard-price">${l.price} <span>${l.unit}</span></div>
-          <button class="btn-sm" onclick="event.stopPropagation();openListingDetail(${l.id})">Voir détails</button>
-        </div>
-      </div>
-    </div>`).join('');
-}
-
-function filterTab(btn,f){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));btn.classList.add('active');renderListings(f)}
-
-function toggleFav(id,btn){
-  if(!S.user){openAuthModal('login');showToast('Connectez-vous pour sauvegarder des favoris');return}
-  S.favs=S.favs.includes(id)?S.favs.filter(x=>x!==id):[...S.favs,id];
-  btn.textContent=S.favs.includes(id)?'❤️':'🤍';
-  showToast(S.favs.includes(id)?'❤️ Ajouté aux favoris':'Retiré des favoris');
-}
-
-function openListingDetail(id){
-  const l=S.listings.find(x=>x.id===id);if(!l)return;
-  document.getElementById('ld-title').textContent=l.title;
-  document.getElementById('ld-body').innerHTML=`
-    <div style="background:var(--g100);border-radius:10px;height:150px;display:flex;align-items:center;justify-content:center;font-size:3.8rem;margin-bottom:18px">${l.emoji}</div>
-    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-      <span class="badge ${l.transaction}">${l.transaction==='vente'?'À Vendre':l.transaction==='location'?'À Louer':'Service'}</span>
-      <span class="badge ok">${l.type}</span>
-    </div>
-    <p style="color:var(--g600);font-size:.86rem;line-height:1.7;margin-bottom:16px">${l.desc||'Aucune description.'}</p>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px;background:var(--g100);border-radius:10px;padding:14px">
-      <div><div style="font-size:.7rem;color:var(--accent);font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px">Localisation</div><div style="font-size:.88rem;font-weight:500">📍 ${l.loc}</div></div>
-      ${l.rooms>0?`<div><div style="font-size:.7rem;color:var(--accent);font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px">Chambres</div><div style="font-size:.88rem;font-weight:500">🛏 ${l.rooms}</div></div>`:''}
-      ${l.area>0?`<div><div style="font-size:.7rem;color:var(--accent);font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px">Surface</div><div style="font-size:.88rem;font-weight:500">📐 ${l.area} m²</div></div>`:''}
-      <div><div style="font-size:.7rem;color:var(--accent);font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:2px">Publié par</div><div style="font-size:.88rem;font-weight:500">🏢 ${l.owner}</div></div>
-    </div>
-    <div style="background:rgba(200,169,110,.1);border:1px solid rgba(200,169,110,.3);border-radius:8px;padding:12px;margin-bottom:18px">
-      <p style="font-size:.8rem;color:var(--g600);line-height:1.65">⚠️ <strong>Important :</strong> F2K IMMO PLUS est un <strong>intermédiaire</strong>. Nous vous montrons le bien. Si vous êtes d'accord, vous payez. <strong>Aucun remboursement</strong> après confirmation. Vérifiez bien avant tout engagement.</p>
-    </div>
-    <div style="font-family:'Playfair Display',serif;font-size:1.4rem;font-weight:700;margin-bottom:14px">${l.price} <span style="font-size:.86rem;font-weight:400;color:var(--g400)">${l.unit}</span></div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <a href="https://wa.me/2290158070708?text=Bonjour%2C%20je%20suis%20intéressé(e)%20par%3A%20${encodeURIComponent(l.title)}" target="_blank" class="btn-primary">💬 Contacter via WhatsApp</a>
-      <a href="mailto:f2kmultiservice@gmail.com?subject=Intérêt pour: ${encodeURIComponent(l.title)}" class="btn-sm" style="padding:14px 18px">✉️ Email</a>
-    </div>`;
-  openModal('m-listing');
-}
-
-function doSearch(){
-  const type=document.getElementById('s-type').value;
-  const trans=document.getElementById('s-trans').value;
-  const loc=document.getElementById('s-loc').value.toLowerCase();
-  const budget=parseInt((document.getElementById('s-budget').value||'').replace(/\s/g,''))||Infinity;
-  const res=S.listings.filter(l=>{
-    return(!type||l.type===type)&&(!trans||l.transaction===trans)&&(!loc||l.loc.toLowerCase().includes(loc))&&(parseInt(l.price.replace(/\s/g,''))||0)<=budget;
-  });
-  renderListings('tous',res);
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',i===0));
-  scrollSec('#listings');
-  showToast(`🔍 ${res.length} résultat(s) trouvé(s)`);
-}
-
-// ══════════════════════════ AUTH ══════════════════════════
-function openAuthModal(tab){authTab(tab);openModal('m-auth')}
-function authTab(tab){
-  document.getElementById('f-login').style.display=tab==='login'?'block':'none';
-  document.getElementById('f-reg').style.display=tab==='register'?'block':'none';
-  document.getElementById('tab-login').classList.toggle('active',tab==='login');
-  document.getElementById('tab-reg').classList.toggle('active',tab==='register');
-  document.getElementById('auth-title').textContent=tab==='login'?'Connexion':'Créer un compte';
-}
-
-function doLogin(e){
-  e.preventDefault();
-  const email=document.getElementById('l-email').value.trim().toLowerCase();
-  const pass=document.getElementById('l-pass').value;
-  if(email===ADMIN_EMAIL.toLowerCase()&&pass===ADMIN_PASS){
-    S.user=S.users[0];closeModal('m-auth');updateNav();showToast('✅ Bienvenue Administrateur !');showPage('admin');return;
-  }
-  const u=S.users.find(x=>x.email.toLowerCase()===email);
-  if(!u){showToast('❌ Aucun compte trouvé.');return}
-  if(pass!==u.pass){showToast('❌ Mot de passe incorrect.');return}
-  S.user=u;closeModal('m-auth');updateNav();showToast(`✅ Bienvenue, ${u.prenom} !`);
-}
-
-function doRegister(e){
-  e.preventDefault();
-  if(!document.getElementById('chk1').checked||!document.getElementById('chk2').checked){showToast('⚠️ Veuillez accepter toutes les conditions.');return}
-  const email=document.getElementById('r-email').value.trim().toLowerCase();
-  if(S.users.find(u=>u.email.toLowerCase()===email)){showToast('❌ Email déjà utilisé.');return}
-  const u={id:Date.now(),prenom:document.getElementById('r-prenom').value,nom:document.getElementById('r-nom').value,email,tel:document.getElementById('r-tel').value,pass:document.getElementById('r-pass').value,role:document.getElementById('r-role').value,date:new Date().toISOString().split('T')[0]};
-  S.users.push(u);S.user=u;
-  closeModal('m-auth');updateNav();updateStats();showToast(`✅ Compte créé ! Bienvenue, ${u.prenom} !`);
-}
-
-function doLogout(){S.user=null;S.favs=[];updateNav();showPage('home');showToast('👋 Déconnexion réussie')}
-
-function updateNav(){
-  const nav=document.getElementById('nav-user');
-  if(!S.user){nav.innerHTML=`<button class="nav-btn outline" onclick="openAuthModal('login')">Connexion</button><button class="nav-btn fill" onclick="openAuthModal('register')">S'inscrire</button>`;return}
-  const isAdm=S.user.role==='admin';
-  const ini=S.user.prenom[0]+(S.user.nom[0]||'');
-  nav.innerHTML=`
-    ${isAdm?`<button class="nav-btn fill" onclick="showPage('admin')">⚙️ Admin</button>`:`<button class="nav-btn outline" onclick="showPage('profile')">Mon espace</button><button class="nav-btn fill" onclick="openAddListing()">+ Publier</button>`}
-    <div class="user-avatar" title="Déconnexion — ${S.user.prenom}" onclick="doLogout()">${ini}</div>`;
-}
-
-// ══════════════════════════ PROFILE ══════════════════════════
-function renderProfile(){
-  const u=S.user;if(!u)return;
-  const mine=S.listings.filter(l=>l.ownerEmail===u.email);
-  const favList=S.listings.filter(l=>S.favs.includes(l.id));
-  const ini=u.prenom[0]+(u.nom[0]||'');
-  document.getElementById('profile-content').innerHTML=`
-    <div>
-      <div class="profile-card">
-        <div class="profile-avatar">${ini}</div>
-        <div class="profile-name">${u.prenom} ${u.nom}</div>
-        <div class="profile-role">${u.role==='proprietaire'?'Propriétaire / Vendeur':'Acheteur / Locataire'}</div>
-        <p style="font-size:.8rem;color:var(--g400)">${u.email}</p>
-        <p style="font-size:.8rem;color:var(--g400);margin-top:3px">${u.tel||'Téléphone non renseigné'}</p>
-        <div class="profile-stat">
-          <div><span class="ps-num">${mine.length}</span><span class="ps-label">Annonces</span></div>
-          <div><span class="ps-num">${favList.length}</span><span class="ps-label">Favoris</span></div>
-        </div>
-      </div>
-      <button class="btn-primary" style="width:100%;margin-top:14px" onclick="openAddListing()">+ Publier un bien</button>
-    </div>
-    <div class="profile-main">
-      ${mine.length?`<div class="pcard"><div class="pcard-title">🏠 Mes annonces (${mine.length})</div>${mine.map(l=>`<div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--g100)"><div style="font-size:1.7rem">${l.emoji}</div><div style="flex:1"><div style="font-weight:600;font-size:.88rem">${l.title}</div><div style="font-size:.78rem;color:var(--g400)">📍 ${l.loc} · ${l.price} ${l.unit}</div></div><button class="btn-danger" onclick="removeListing(${l.id})">Retirer</button></div>`).join('')}</div>`:''}
-      <div class="pcard"><div class="pcard-title">❤️ Mes favoris (${favList.length})</div>${favList.length?favList.map(l=>`<div style="display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--g100);cursor:pointer" onclick="openListingDetail(${l.id})"><div style="font-size:1.7rem">${l.emoji}</div><div style="flex:1"><div style="font-weight:600;font-size:.88rem">${l.title}</div><div style="font-size:.78rem;color:var(--g400)">📍 ${l.loc} · ${l.price} ${l.unit}</div></div></div>`).join(''):'<p style="color:var(--g400);text-align:center;padding:18px;font-size:.86rem">Aucun favori. Cliquez sur 🤍 sur une annonce.</p>'}</div>
-    </div>`;
-}
-
-function removeListing(id){S.listings=S.listings.filter(l=>l.id!==id);renderProfile();renderListings('tous');updateStats();showToast('🗑️ Annonce retirée')}
-
-// ══════════════════════════ ADD LISTING ══════════════════════════
-function openAddListing(){
-  if(!S.user){openAuthModal('register');showToast('Créez un compte pour publier un bien');return}
-  openModal('m-add');
-}
-function pickEmoji(el){document.querySelectorAll('#emoji-grid .img-opt').forEach(e=>e.classList.remove('selected'));el.classList.add('selected');S.emoji=el.dataset.e}
-function doAddListing(e){
-  e.preventDefault();
-  const l={id:Date.now(),type:document.getElementById('al-type').value,title:document.getElementById('al-title').value,loc:document.getElementById('al-loc').value,price:document.getElementById('al-price').value,unit:document.getElementById('al-unit').value,rooms:parseInt(document.getElementById('al-rooms').value)||0,bath:0,area:parseInt(document.getElementById('al-area').value)||0,transaction:document.getElementById('al-trans').value,emoji:S.emoji,ic:icClass(document.getElementById('al-type').value),desc:document.getElementById('al-desc').value,owner:`${S.user.prenom} ${S.user.nom}`,ownerEmail:S.user.email,date:new Date().toISOString().split('T')[0]};
-  S.listings.unshift(l);closeModal('m-add');renderListings('tous');updateStats();e.target.reset();showToast('✅ Annonce publiée !');
-}
-
-// ══════════════════════════ ADMIN ══════════════════════════
-function showAdmTab(tab,el){
-  S.admTab=tab;
-  document.querySelectorAll('.adm-menu li a').forEach(a=>a.classList.remove('active-adm'));
-  if(el)el.classList.add('active-adm');
-  renderAdmTab(tab);
-}
-
-function renderAdmTab(tab){
-  const el=document.getElementById('admin-content');
-  if(!el)return;
-  if(tab==='dashboard'){
-    el.innerHTML=`<div class="admin-hdr"><div class="admin-page-title">📊 Tableau de bord</div><span style="font-size:.82rem;color:var(--g400)">${new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}</span></div>
-    <div class="stat-cards">
-      <div class="stat-card"><div class="sc-icon">🏠</div><div class="sc-num">${S.listings.length}</div><div class="sc-label">Annonces actives</div></div>
-      <div class="stat-card"><div class="sc-icon">👥</div><div class="sc-num">${S.users.filter(u=>u.role!=='admin').length}</div><div class="sc-label">Membres inscrits</div></div>
-      <div class="stat-card"><div class="sc-icon">🏷️</div><div class="sc-num">${S.listings.filter(l=>l.transaction==='vente').length}</div><div class="sc-label">Biens à vendre</div></div>
-      <div class="stat-card"><div class="sc-icon">🔑</div><div class="sc-num">${S.listings.filter(l=>l.transaction==='location').length}</div><div class="sc-label">Biens à louer</div></div>
-    </div>
-    <div style="background:var(--white);border:1px solid var(--g200);border-radius:12px;padding:22px">
-      <h3 style="font-family:'Playfair Display',serif;font-size:1.05rem;margin-bottom:14px">📋 Dernières annonces</h3>
-      ${S.listings.slice(0,6).map(l=>`<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--g100)"><span style="font-size:1.5rem">${l.emoji}</span><div style="flex:1"><div style="font-weight:600;font-size:.86rem">${l.title}</div><div style="font-size:.76rem;color:var(--g400)">📍 ${l.loc} · ${l.date}</div></div><span class="badge ${l.transaction}">${l.transaction}</span><button class="btn-danger" onclick="admDelListing(${l.id})">✕</button></div>`).join('')}
-    </div>`;
-  } else if(tab==='listings'){
-    el.innerHTML=`<div class="admin-hdr"><div class="admin-page-title">🏠 Toutes les annonces</div><button class="btn-primary" onclick="showAdmTab('add',document.querySelector('.adm-menu li:nth-child(3) a'))">+ Ajouter</button></div>
-    <table class="data-table"><thead><tr><th>Bien</th><th>Transaction</th><th>Prix</th><th>Publieur</th><th>Date</th><th>Action</th></tr></thead><tbody>
-    ${S.listings.map(l=>`<tr><td><strong>${l.emoji} ${l.title}</strong><br><span style="font-size:.76rem;color:var(--g400)">📍 ${l.loc}</span></td><td><span class="badge ${l.transaction}">${l.transaction}</span></td><td style="font-weight:600;font-size:.84rem">${l.price} ${l.unit}</td><td style="font-size:.8rem">${l.owner}</td><td style="font-size:.76rem;color:var(--g400)">${l.date}</td><td><button class="btn-danger" onclick="admDelListing(${l.id})">Supprimer</button></td></tr>`).join('')}
-    </tbody></table>`;
-  } else if(tab==='add'){
-    el.innerHTML=`<div class="admin-hdr"><div class="admin-page-title">➕ Ajouter un bien / service</div></div>
-    <div style="background:var(--white);border:1px solid var(--g200);border-radius:14px;padding:28px;max-width:560px">
-      <form class="form" onsubmit="admAddListing(event)">
-        <div class="fg light"><label>Titre</label><input type="text" id="ad-title" placeholder="Titre de l'annonce" required></div>
-        <div class="form-row">
-          <div class="fg light"><label>Type</label><select id="ad-type"><option>Villa</option><option>Appartement</option><option>Bureau</option><option>Terrain</option><option>Local commercial</option><option>Service</option></select></div>
-          <div class="fg light"><label>Transaction</label><select id="ad-trans"><option value="vente">Vente</option><option value="location">Location</option><option value="service">Service</option></select></div>
-        </div>
-        <div class="fg light"><label>Localisation</label><input type="text" id="ad-loc" placeholder="Quartier, ville..." required></div>
-        <div class="form-row">
-          <div class="fg light"><label>Prix</label><input type="text" id="ad-price" placeholder="Ex: 75 000 000" required></div>
-          <div class="fg light"><label>Unité</label><select id="ad-unit"><option value="FCFA">FCFA</option><option value="FCFA/mois">FCFA/mois</option><option value="FCFA/an">FCFA/an</option><option value="FCFA/prestation">FCFA/prestation</option></select></div>
-        </div>
-        <div class="form-row">
-          <div class="fg light"><label>Chambres</label><input type="number" id="ad-rooms" placeholder="0" min="0"></div>
-          <div class="fg light"><label>Surface (m²)</label><input type="number" id="ad-area" placeholder="0" min="0"></div>
-        </div>
-        <div class="fg light"><label>Icône</label>
-          <div class="img-select-grid" id="adm-emoji-grid">
-            <div class="img-opt selected" data-e="🏡" onclick="pickAdmEmoji(this)">🏡<span>Villa</span></div>
-            <div class="img-opt" data-e="🏢" onclick="pickAdmEmoji(this)">🏢<span>Appart.</span></div>
-            <div class="img-opt" data-e="🏬" onclick="pickAdmEmoji(this)">🏬<span>Bureau</span></div>
-            <div class="img-opt" data-e="🌿" onclick="pickAdmEmoji(this)">🌿<span>Terrain</span></div>
-            <div class="img-opt" data-e="🧹" onclick="pickAdmEmoji(this)">🧹<span>Entretien</span></div>
-            <div class="img-opt" data-e="🚚" onclick="pickAdmEmoji(this)">🚚<span>Déménag.</span></div>
-            <div class="img-opt" data-e="🏠" onclick="pickAdmEmoji(this)">🏠<span>Maison</span></div>
-            <div class="img-opt" data-e="🛋️" onclick="pickAdmEmoji(this)">🛋️<span>Studio</span></div>
-            <div class="img-opt" data-e="🏪" onclick="pickAdmEmoji(this)">🏪<span>Local</span></div>
-            <div class="img-opt" data-e="⚖️" onclick="pickAdmEmoji(this)">⚖️<span>Notaire</span></div>
-          </div>
-        </div>
-        <div class="fg light"><label>Description</label><textarea id="ad-desc" rows="4" placeholder="Décrivez le bien en détail..."></textarea></div>
-        <button type="submit" class="btn-primary" style="width:100%">✅ Publier l'annonce</button>
-      </form>
-    </div>`;
-    S.admEmoji='🏡';
-  } else if(tab==='users'){
-    el.innerHTML=`<div class="admin-hdr"><div class="admin-page-title">👥 Membres inscrits</div></div>
-    <table class="data-table"><thead><tr><th>Nom</th><th>Email</th><th>Téléphone</th><th>Rôle</th><th>Inscription</th><th>Action</th></tr></thead><tbody>
-    ${S.users.map(u=>`<tr><td><strong>${u.prenom} ${u.nom}</strong></td><td>${u.email}</td><td>${u.tel||'—'}</td><td><span class="badge ${u.role==='admin'?'admin-b':u.role==='proprietaire'?'vente':'location'}">${u.role}</span></td><td style="font-size:.76rem;color:var(--g400)">${u.date}</td><td>${u.role!=='admin'?`<button class="btn-danger" onclick="admDelUser(${u.id})">Supprimer</button>`:'<span style="color:var(--g400);font-size:.78rem">Admin</span>'}</td></tr>`).join('')}
-    </tbody></table>`;
-  } else if(tab==='messages'){
-    el.innerHTML=`<div class="admin-hdr"><div class="admin-page-title">📩 Messages reçus</div></div>
-    ${S.messages.length?`<table class="data-table"><thead><tr><th>De</th><th>Email</th><th>Service</th><th>Message</th><th>Date</th></tr></thead><tbody>${S.messages.map(m=>`<tr><td>${m.name}</td><td>${m.email}</td><td>${m.service||'—'}</td><td style="max-width:200px;font-size:.8rem">${m.msg||'—'}</td><td style="font-size:.76rem;color:var(--g400)">${m.date}</td></tr>`).join('')}</tbody></table>`:'<div style="text-align:center;padding:60px;color:var(--g400)">📭 Aucun message reçu.</div>'}`;
-  }
-}
-
-function pickAdmEmoji(el){document.querySelectorAll('#adm-emoji-grid .img-opt').forEach(e=>e.classList.remove('selected'));el.classList.add('selected');S.admEmoji=el.dataset.e}
-
-function admAddListing(e){
-  e.preventDefault();
-  const l={id:Date.now(),type:document.getElementById('ad-type').value,title:document.getElementById('ad-title').value,loc:document.getElementById('ad-loc').value,price:document.getElementById('ad-price').value,unit:document.getElementById('ad-unit').value,rooms:parseInt(document.getElementById('ad-rooms').value)||0,bath:0,area:parseInt(document.getElementById('ad-area').value)||0,transaction:document.getElementById('ad-trans').value,emoji:S.admEmoji||'🏡',ic:icClass(document.getElementById('ad-type').value),desc:document.getElementById('ad-desc').value,owner:'Agence F2K',ownerEmail:ADMIN_EMAIL,date:new Date().toISOString().split('T')[0]};
-  S.listings.unshift(l);renderListings('tous');updateStats();
-  showToast('✅ Annonce ajoutée !');showAdmTab('listings',null);
-  document.querySelectorAll('.adm-menu li a').forEach((a,i)=>{a.classList.remove('active-adm');if(i===1)a.classList.add('active-adm')});
-}
-
-function admDelListing(id){S.listings=S.listings.filter(l=>l.id!==id);renderListings('tous');updateStats();renderAdmTab(S.admTab);showToast('🗑️ Annonce supprimée')}
-function admDelUser(id){S.users=S.users.filter(u=>u.id!==id);renderAdmTab('users');updateStats();showToast('🗑️ Utilisateur supprimé')}
-
-// ══════════════════════════ SERVICE MODALS ══════════════════════════
-const srvData={
-  vente:{title:'🏠 Vente Immobilière',desc:"Vous souhaitez acheter ou vendre un bien ? Notre équipe vous accompagne à chaque étape : estimation, mise en vente, négociation et signature."},
-  location:{title:'🔑 Location',desc:"Trouvez le logement ou bureau idéal parmi nos annonces. Nous simplifions chaque étape, du dossier à la remise des clés."},
-  gestion:{title:'📋 Gestion Locative',desc:"Confiez votre patrimoine à F2K IMMO PLUS. Nous gérons vos biens de A à Z : loyers, locataires, entretien et comptabilité."},
-  entretien:{title:'🧹 Entretien Bureaux & Maisons',desc:"Des équipes professionnelles et discrètes pour l'entretien régulier ou ponctuel de vos bureaux et résidences."},
-  demenagement:{title:'🚚 Déménagement',desc:"Service complet de déménagement : emballage, transport sécurisé, installation dans votre nouveau lieu de vie."},
-  notaire:{title:'⚖️ Services Notariaux',desc:"Nous vous mettons en relation avec nos notaires partenaires pour sécuriser et officialiser vos transactions."},
-};
-function openSrvModal(k){const d=srvData[k];document.getElementById('srv-title').textContent=d.title;document.getElementById('srv-desc').textContent=d.desc;openModal('m-service')}
-function handleSrvContact(e){e.preventDefault();closeModal('m-service');showToast('✅ Demande envoyée ! Un conseiller vous contacte bientôt.');e.target.reset()}
-function handleContact(e){e.preventDefault();const f=e.target;S.messages.push({name:f[0].value+' '+f[1].value,email:f[2].value,service:f[4].value,msg:f[5].value,date:new Date().toLocaleDateString('fr-FR')});showToast('✅ Message envoyé ! Réponse sous 24h.');e.target.reset()}
-
-// ══════════════════════════ TERMS ══════════════════════════
-const termsData={
-  locataire:`<div class="terms-section"><h3>1. Rôle de l'agence</h3><p>F2K IMMO PLUS agit exclusivement en tant qu'<strong>intermédiaire</strong> entre le locataire et le propriétaire. L'agence ne possède aucun des biens présentés et n'est en aucun cas partie au contrat de bail.</p><div class="highlight">⚠️ F2K IMMO PLUS n'est pas responsable de l'état du bien, des vices cachés, ni des litiges entre locataire et propriétaire.</div></div><div class="terms-section"><h3>2. Processus de location</h3><ul><li>Le locataire consulte les annonces disponibles sur la plateforme.</li><li>L'agence organise une visite du bien. <strong>La visite est obligatoire avant tout engagement.</strong></li><li>Si le locataire est satisfait, il confirme son intérêt.</li><li>Le paiement s'effectue après accord mutuel. <strong>Aucun remboursement n'est possible</strong> après signature du contrat.</li></ul></div><div class="terms-section"><h3>3. Obligations du locataire</h3><ul><li>Fournir des documents justificatifs honnêtes et complets.</li><li>Respecter les termes du contrat de bail.</li><li>Payer le loyer aux dates convenues.</li><li>Entretenir le bien loué en bon état.</li><li>Ne pas sous-louer sans accord écrit du propriétaire.</li></ul></div><div class="terms-section"><h3>4. Limitation de responsabilité</h3><div class="highlight">F2K IMMO PLUS ne pourra être tenue responsable de tout dommage résultant de l'occupation du bien. Le locataire reconnaît avoir visité et accepté le bien en connaissance de cause.</div></div>`,
-  proprietaire:`<div class="terms-section"><h3>1. Rôle de l'agence</h3><p>F2K IMMO PLUS agit comme <strong>intermédiaire</strong> pour faciliter la mise en relation. L'agence ne gère pas les biens directement sauf si un mandat de gestion locative est signé.</p></div><div class="terms-section"><h3>2. Publication d'une annonce</h3><ul><li>Le propriétaire certifie être le détenteur légal du bien publié.</li><li>Les informations publiées doivent être exactes, honnêtes et à jour.</li><li>Toute annonce frauduleuse entraîne la suppression immédiate du compte.</li><li>L'agence se réserve le droit de vérifier et modérer les annonces.</li></ul></div><div class="terms-section"><h3>3. Obligations du propriétaire</h3><ul><li>Présenter un bien conforme à la description publiée.</li><li>Permettre les visites organisées par l'agence.</li><li>Informer l'agence de toute modification ou retrait du bien.</li><li>Respecter les engagements pris envers les locataires.</li></ul></div><div class="terms-section"><h3>4. Limitation de responsabilité</h3><div class="highlight">F2K IMMO PLUS n'est pas responsable des actes ou manquements des locataires présentés. Le propriétaire assume l'entière responsabilité de son bien.</div></div>`,
-  acheteur:`<div class="terms-section"><h3>1. Principe fondamental</h3><div class="highlight">🔑 <strong>Vous achetez ce que vous voyez.</strong> F2K IMMO PLUS organise la visite du bien. Si vous êtes d'accord après la visite, vous procédez au paiement. <strong>Aucun remboursement n'est possible</strong> après confirmation de la transaction.</div></div><div class="terms-section"><h3>2. Rôle de l'agence</h3><p>F2K IMMO PLUS est un <strong>simple intermédiaire</strong>. L'agence met en relation l'acheteur et le vendeur. Elle ne garantit pas la valeur du bien, son état futur, ni la situation juridique au-delà des informations communiquées.</p></div><div class="terms-section"><h3>3. Processus d'achat</h3><ul><li>Consultation de l'annonce.</li><li>Demande de visite auprès de l'agence.</li><li><strong>Visite obligatoire avant tout paiement.</strong></li><li>Accord de l'acheteur sur l'état et le prix.</li><li>Paiement et signature des documents.</li><li>Remise des clés / acte de vente.</li></ul></div><div class="terms-section"><h3>4. Non-remboursement</h3><div class="highlight">⚠️ Une fois le paiement effectué et les documents signés, <strong>aucun remboursement ne sera accordé</strong> par F2K IMMO PLUS. L'acheteur reconnaît avoir pris connaissance du bien et l'avoir accepté en toute conscience.</div></div><div class="terms-section"><h3>5. Litiges</h3><p>Tout litige entre acheteur et vendeur est de leur ressort exclusif. F2K IMMO PLUS ne peut être assigné dans un litige portant sur la qualité ou la valeur d'un bien. Cependant, l'agence peut à titre de bonne foi faciliter la médiation.</p></div>`,
-  vendeur:`<div class="terms-section"><h3>1. Conditions de mise en vente</h3><ul><li>Le vendeur certifie être le propriétaire légitime du bien mis en vente.</li><li>Le bien doit être libre de tout litige judiciaire au moment de la vente.</li><li>Les documents de propriété doivent être authentiques et à jour.</li><li>Toute fraude ou falsification entraîne la suppression du compte et des poursuites légales.</li></ul></div><div class="terms-section"><h3>2. Rôle de l'agence</h3><p>F2K IMMO PLUS publie votre annonce, organise les visites et met en relation avec les acheteurs potentiels. L'agence est un <strong>intermédiaire</strong> et n'engage pas sa responsabilité sur la transaction finale.</p></div><div class="terms-section"><h3>3. Obligations du vendeur</h3><ul><li>Fournir des informations exactes et complètes sur le bien.</li><li>Être disponible pour les visites organisées par l'agence.</li><li>Honorer les prix et conditions annoncés.</li><li>Remettre tous les documents légaux lors de la transaction.</li></ul></div><div class="terms-section"><h3>4. Commission de l'agence</h3><p>Une commission sera convenue avant la mise en vente. Elle est due à l'agence dès la finalisation de la vente.</p></div><div class="terms-section"><h3>5. Limitation de responsabilité</h3><div class="highlight">F2K IMMO PLUS ne pourra être tenue responsable d'aucun préjudice lié à la transaction. Le vendeur assume l'entière responsabilité juridique et financière de la vente de son bien.</div></div>`
-};
-
-function openTermsModal(tab){
-  const t=tab||'locataire';
-  showTermsTab(t,null);
-  document.querySelectorAll('.tterm-tab').forEach((btn,i)=>{btn.classList.toggle('active',['locataire','proprietaire','acheteur','vendeur'][i]===t)});
-  openModal('m-terms');
-}
-function showTermsTab(tab,btn){
-  if(btn){document.querySelectorAll('.tterm-tab').forEach(t=>t.classList.remove('active'));btn.classList.add('active')}
-  document.getElementById('terms-body').innerHTML=termsData[tab]||'';
-}
-
-// ══════════════════════════ MODALS ══════════════════════════
-function openModal(id){document.getElementById(id).classList.add('open');document.body.style.overflow='hidden'}
-function closeModal(id){document.getElementById(id).classList.remove('open');document.body.style.overflow=''}
-document.querySelectorAll('.modal-overlay').forEach(o=>o.addEventListener('click',e=>{if(e.target===o)closeModal(o.id)}));
-document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelectorAll('.modal-overlay.open').forEach(m=>closeModal(m.id))});
-
-// ══════════════════════════ TOAST ══════════════════════════
-let toastT;
-function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),3500)}
-</script>
-</body>
-</html>
+<script data-cfasync="fal
